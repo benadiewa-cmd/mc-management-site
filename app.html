@@ -198,6 +198,11 @@ function docRef(path){
     get:function(){ return ready.then(function(){ return snap(path); }); },
     set:function(d){
       return ready.then(function(){
+        /* Standing on no charter - the Overall Admin before he has laid the
+           club out - there is nowhere to write to. Keep it in memory so the
+           screens behave, and let the Structure screen be the thing that
+           actually writes, through save_org. */
+        if(!CHARTER){ mem[path]=clone(d); fire(path); return null; }
         var body = clone(d);
         return sb.from("charter_docs").upsert(
           {charter_id:CHARTER, path:path, data:body, updated_at:new Date().toISOString()},
@@ -215,6 +220,7 @@ function docRef(path){
     },
     "delete":function(){
       return ready.then(function(){
+        if(!CHARTER){ delete mem[path]; fire(path); return null; }
         return sb.from("charter_docs").delete().eq("charter_id",CHARTER).eq("path",path);
       }).then(function(r){
         if(r && r.error) throw refused(r.error);
@@ -568,7 +574,12 @@ function start(){
     if(r.error) throw r.error;
     ME = r.data;
     if(!ME) throw new Error("no profile");
-    if(!ME.charterId) throw new Error("You are not on a charter yet. Ask the Overall Admin.");
+    /* A man who holds a national or regional office need not sit on any one
+       charter, and the Overall Admin usually does not: he is the one who
+       creates the charters in the first place. Turning him away for having no
+       charter locked the only man who could unlock it out of his own club. */
+    if(!ME.charterId && ME.scope !== "national" && ME.scope !== "region")
+      throw new Error("You are not on a charter yet. Ask the Overall Admin.");
     window.__SERVER_USER__ = {
       id: ME.id, name: ME.name, memberId: ME.memberId,
       charterId: ME.charterId, clubId: ME.clubId,
@@ -577,7 +588,13 @@ function start(){
     };
     return loadShape();
   }).then(function(){
-    return loadCharter(ME.charterId);
+    /* No charter of his own: stand on the first one he is allowed to see, so
+       the screens have something to show. On a club with no charters yet there
+       is nothing to stand on, and he goes straight to the Structure screen to
+       lay the club out. */
+    var id = ME.charterId || (CHARTERS[0] && CHARTERS[0].id) || null;
+    if(!id){ CHARTER = null; mem = {}; fireAll(); return true; }
+    return loadCharter(id);
   }).then(function(){
     return loadRollup();
   }).then(function(rows){
