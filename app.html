@@ -3,6 +3,7 @@
 window.__MCF_CONFIG__={};
 window.__STANDALONE__=false;
 </script>
+<script src="config.js"></script>
 <script>
 "use strict";(self.webpackChunksupabase=self.webpackChunksupabase||[]).push([[591],{591:e=>{e.exports=function(){throw new Error("ws does not work in the browser. Browser clients must use the native WebSocket object")}}}]);
 </script>
@@ -7593,8 +7594,17 @@ function renderCharterPicker(){
 function renderBrand(){
   applyHeadingFont();
   setFavicon();
-  $("#brandName").textContent = S.club?S.club.name:"Your Charter";
-  $("#brandSub").textContent = S.club?(S.club.subtitle||"Club books"):"";
+  /* The club on top, this charter underneath it - so a man can see at a
+     glance which charter's books he has open, and which club they belong
+     to, without reading anything else on the screen. Before National has
+     been named on the Structure screen there is nothing to put on top, so
+     it falls back to the charter and its strapline. */
+  const natName=((orgTree().national||{}).name||"").trim();
+  const chName=((S.club&&S.club.name)||"").trim();
+  $("#brandName").textContent = natName || chName || "Your Charter";
+  $("#brandSub").textContent  = natName
+    ? chName
+    : (S.club? (S.club.subtitle||"Club books") : "");
   const c=$("#crest"); c.textContent="";
   /* A charter's own badge on its own screen. Falls back to the club badge
      for a charter that has not been given one yet. */
@@ -15103,7 +15113,11 @@ function viewSettings(){
       el("div",{class:"body",style:"display:flex;flex-direction:column;gap:12px"},
         el("div",{class:"grid3"},
           el("label",{class:"f"},el("span",{},"This charter"),charterNameField()),
-          el("label",{class:"f"},el("span",{},"Strapline"),txt("subtitle","Club books")),
+          el("label",{class:"f"},el("span",{},"Strapline"),txt("subtitle","Club books"),
+            el("span",{style:"font-size:11.5px;color:var(--muted)"},
+              "Shown under the name in the corner only until National is named "
+              +"on the Structure screen \u2014 after that the charter's own name "
+              +"sits there instead.")),
           el("label",{class:"f"},el("span",{},"Full name on reports"),txt("legalName"))),
         el("div",{class:"grid3"},
           el("label",{class:"f"},el("span",{},"Treasurer"),treasurerField()),
