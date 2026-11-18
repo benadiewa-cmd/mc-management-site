@@ -17,5 +17,5 @@
  */
 window.__MCF_CONFIG__ = {
   url:     "https://bnitopfcuqqdbjkszrek.supabase.co",
-  anonKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSI"
+  anonKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJuaXRvcGZjdXFxZGJqa3N6cmVrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQ5Mjk5MzEsImV4cCI6MjExMDUwNTkzMX0.8BNgmBCz67qQvijoi_oYvK-Z0uJBpN74NjQA_3u8apM"
 };
