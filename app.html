@@ -765,8 +765,11 @@ button,input,select,textarea{font:inherit;color:inherit}
 .crest{width:42px;height:42px;flex:0 0 42px;border:1px solid var(--line-2);border-radius:2px;background:var(--surface-2);display:grid;place-items:center;overflow:hidden}
 .crest img{width:100%;height:100%;object-fit:contain}
 .crest span{font-family:var(--fd);font-size:17px;color:var(--brass);letter-spacing:.04em}
-.brandbox b{display:block;font-family:var(--fd);font-size:17px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;line-height:1.1}
-.brandbox small{display:block;color:var(--muted);font-size:11px;letter-spacing:.1em;text-transform:uppercase;font-family:var(--fd)}
+.brandbox b{display:block;font-family:var(--fh,var(--fd));font-size:17px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;line-height:1.1}
+.brandbox small{display:block;color:var(--muted);font-size:11px;letter-spacing:.1em;text-transform:uppercase;font-family:var(--fh,var(--fd))}
+/* The club's own face, wherever the club, a region or a charter is named.
+   Falls back to Oswald until a font is uploaded in Settings. */
+.cn{font-family:var(--fh,var(--fd))}
 nav{display:flex;flex-direction:column;padding:10px 8px;gap:2px}
 nav button{display:flex;align-items:center;gap:10px;width:100%;text-align:left;background:none;border:0;padding:8px 10px;border-radius:var(--r);cursor:pointer;color:var(--ink-2);font-weight:500}
 nav button .k{font-family:var(--fd);font-size:11px;letter-spacing:.1em;color:var(--muted);width:16px;text-align:center}
@@ -1744,7 +1747,8 @@ function charterPicker(idAttr,cur,opts){
   opts=opts||{};
   cur=String(cur||"");
   const all=orgCharters();
-  const sel=el("select",opts.onchange? {id:idAttr,onchange:opts.onchange} : {id:idAttr});
+  const sel=el("select",opts.onchange
+    ? {id:idAttr,class:"cn",onchange:opts.onchange} : {id:idAttr,class:"cn"});
   const known=all.some(function(x){ return slug(x.ch.name)===slug(cur); });
   if(opts.blank) sel.append(el("option",{value:"",selected:(!cur)?true:null},opts.blank));
   if(cur && !known)
@@ -7574,7 +7578,7 @@ function renderCharterPicker(){
   slot.textContent="";
   const box=el("div",{style:"padding:2px 14px 10px"});
   slot.append(box);
-  const sel=el("select",{id:"charterSel",style:
+  const sel=el("select",{id:"charterSel",class:"cn",style:
     "width:100%;font-size:12px;padding:4px 6px;border:1px solid var(--line);"+
     "border-radius:6px;background:#fff;color:var(--ink)"},
     list.map(c=>el("option",{value:c.id,selected:c.id===current?true:null},
@@ -11110,7 +11114,7 @@ function orgCharterRow(reg,c,i,n){
     el("div",{style:"flex:1 1 190px;min-width:0"},
       el("div",{class:"row",style:"align-items:center;gap:7px"},
         c.code? el("span",{class:"cat",style:"font-family:var(--fd);letter-spacing:.06em"},c.code):null,
-        el("b",{},c.name||"Unnamed charter"),
+        el("b",{class:"cn"},c.name||"Unnamed charter"),
         mine? el("span",{class:"status exec"},"This charter"):null),
       el("div",{style:"font-size:11.5px;color:var(--muted);margin-top:2px"},
         [c.town||null,
@@ -11146,7 +11150,7 @@ function orgRegionPanel(r,i,n){
   return el("section",{class:"panel"},
     el("header",{},
       r.code? el("span",{class:"cat",style:"font-family:var(--fd);margin-right:8px"},r.code):null,
-      el("h2",{},r.name),
+      el("h2",{class:"cn"},r.name),
       mine? el("span",{class:"status exec",style:"margin-left:8px"},"Your region"):null,
       el("div",{class:"spacer"}),
       el("span",{style:"font-size:12px;color:var(--muted)"},
@@ -11176,7 +11180,7 @@ function viewOrg(){
   const out=[];
 
   out.push(el("section",{class:"panel"},
-    el("header",{},el("h2",{},nat.name||"The club"),
+    el("header",{},el("h2",{class:"cn"},nat.name||"The club"),
       nat.code? el("span",{class:"cat",style:"margin-left:8px;font-family:var(--fd)"},nat.code):null,
       el("div",{class:"spacer"}),
       el("span",{style:"font-size:12px;color:var(--muted)"},"National"),
@@ -11591,7 +11595,7 @@ function printOrgChart(){
     docHead("The club's structure",
       (t.national.name||"The club")+" · as at "+fdate(today())),
     el("div",{style:box+"text-align:center;max-width:300px;margin:0 auto 4px;background:#f3f1ec"},
-      el("div",{style:"font-weight:700;font-size:14px"},t.national.name||"National"),
+      el("div",{class:"cn",style:"font-weight:700;font-size:14px"},t.national.name||"National"),
       el("div",{style:"font-size:11px;color:#555"},
         [t.national.code||null,t.national.seat||null,t.national.country||null]
           .filter(Boolean).join(" · ")||"National")),
@@ -11606,7 +11610,7 @@ function printOrgChart(){
     t.regions.map(function(r){
       const rows=r.charters||[];
       return el("div",{style:"margin-top:15px;break-inside:avoid"},
-        el("h2",{},r.name+(r.code? ("  ("+r.code+")") : "")),
+        el("h2",{class:"cn"},r.name+(r.code? ("  ("+r.code+")") : "")),
         (r.seat||r.formed)? el("p",{style:"font-size:11.5px;color:#555;margin:-6px 0 6px"},
           [r.seat? ("Seat: "+r.seat) : null,
            r.formed? ("formed "+fdate(r.formed)) : null].filter(Boolean).join(" · ")) : null,
@@ -11614,7 +11618,7 @@ function printOrgChart(){
           el("thead",{},el("tr",{},el("th",{},"Code"),el("th",{},"Charter"),
             el("th",{},"Town"),el("th",{},"Chartered"),el("th",{},"Standing"))),
           el("tbody",{},rows.map(function(c){
-            return el("tr",{},el("td",{},c.code||"—"),el("td",{},el("b",{},c.name)),
+            return el("tr",{},el("td",{},c.code||"—"),el("td",{},el("b",{class:"cn"},c.name)),
               el("td",{},c.town||"—"),el("td",{},c.formed? fdate(c.formed) : "—"),
               el("td",{},chStatus(c.status).label));
           })))
@@ -14926,7 +14930,7 @@ function viewSettings(){
     }
     const cur=String(c.name||"");
     const known=all.some(function(x){ return slug(x.ch.name)===slug(cur); });
-    const sel=el("select",{id:"s-name"});
+    const sel=el("select",{id:"s-name",class:"cn"});
     if(!cur || !known){
       sel.append(el("option",{value:cur,selected:true},
         cur? (cur+"  \u2014 not on the structure") : "Which charter is this?"));
