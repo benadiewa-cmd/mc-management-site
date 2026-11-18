@@ -17,5 +17,5 @@
  */
 window.__MCF_CONFIG__ = {
   url:     "https://bnitopfcuqqdbjkszrek.supabase.co",
-  anonKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSI..."
+  anonKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSI"
 };
