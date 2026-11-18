@@ -1552,6 +1552,92 @@ function regionOfCharter(name){
    travels the way a return does, only downwards: one small file, sent to
    every charter and loaded on each phone. No brother is named in it and no
    figure goes near it - it is the shape of the club and nothing else.     */
+/* ==================== the badges ====================
+   The club has one badge and every charter has its own. They belong on the
+   structure rather than in one charter's settings, because the man reading
+   a report is often not the man who keeps that charter's books: a regional
+   president opening Ballistic's report must see Ballistic's badge, not the
+   one that happens to be set on his own phone.
+
+   They are kept inside the structure itself as small pictures, so they go
+   wherever it goes - onto a phone, into a backup file, up to the server and
+   back down again - with nothing else to carry and nothing to go missing.
+   A badge is cut down to 256 pixels on its longest side on the way in,
+   which is more than a letterhead ever prints, and refused outright if it
+   still will not fit. Twenty charters cost about a third of a megabyte. */
+const CREST_SIDE=256;
+const CREST_CAP=120000;          /* characters of data URL, about 88 KB */
+function isCrest(v){
+  return typeof v==="string" && v.length<=CREST_CAP
+      && /^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(v);
+}
+function blobToDataUrl(b){
+  return new Promise(function(res,rej){
+    const fr=new FileReader();
+    fr.onload=function(){ res(String(fr.result||"")); };
+    fr.onerror=function(){ rej(new Error("could not read that picture")); };
+    fr.readAsDataURL(b);
+  });
+}
+/* Draw it down to badge size and squeeze until it fits. webp first, because
+   it keeps a cut-out badge's transparency and is the smallest of the three;
+   png after it, so a badge never ends up on a black square. */
+async function crestFromFile(file){
+  if(!file) throw new Error("no picture");
+  const t=String(file.type||"").toLowerCase();
+  if(t==="image/svg+xml")
+    throw new Error("Save the badge as a PNG first — an SVG cannot be cut down to size here.");
+  if(!/^image\//.test(t)) throw new Error("That is not a picture.");
+  const bmp=await loadPicture(file);
+  const w=bmp.width||bmp.naturalWidth, h=bmp.height||bmp.naturalHeight;
+  if(!w||!h){ if(bmp.close) bmp.close(); throw new Error("could not read that picture"); }
+  const scale=Math.min(1, CREST_SIDE/Math.max(w,h));
+  const cv=document.createElement("canvas");
+  cv.width=Math.max(1,Math.round(w*scale));
+  cv.height=Math.max(1,Math.round(h*scale));
+  const x=cv.getContext("2d");
+  if(!x){ if(bmp.close) bmp.close(); throw new Error("could not read that picture"); }
+  x.imageSmoothingEnabled=true;
+  try{ x.imageSmoothingQuality="high"; }catch(e){}
+  x.drawImage(bmp,0,0,cv.width,cv.height);
+  if(bmp.close) bmp.close();
+  const tries=[["image/webp",0.92],["image/webp",0.8],["image/webp",0.66],
+               ["image/png",1],["image/jpeg",0.8]];
+  for(let i=0;i<tries.length;i++){
+    const b=await canvasToBlob(cv,tries[i][0],tries[i][1]);
+    if(!b) continue;
+    const u=await blobToDataUrl(b);
+    if(isCrest(u)) return u;
+  }
+  throw new Error("That picture will not cut down small enough. Try a simpler one.");
+}
+/* The club's badge, then whatever this charter was given before the
+   structure held badges at all. */
+function clubCrestSrc(){
+  const t=orgTree();
+  if(t && t.national && isCrest(t.national.logo)) return t.national.logo;
+  const id=(S.club&&S.club.logoId)||"";
+  return id? blobUrl(id) : "";
+}
+/* The badge of one named charter. With no name it means the charter whose
+   books are open, which is what every report wants. */
+function charterCrestSrc(name){
+  const who=name||myCharter();
+  if(who){
+    const all=orgCharters();
+    for(let i=0;i<all.length;i++){
+      if(chMatches(all[i].ch,who) && isCrest(all[i].ch.logo)) return all[i].ch.logo;
+    }
+  }
+  /* Only fall back to this device's own badge for this device's own
+     charter. Another charter with no badge set shows none, rather than
+     quietly printing somebody else's. */
+  if(!name || chMatches({name:myCharter(),aka:[]},who)){
+    const id=(S.club&&S.club.logo2Id)||"";
+    if(id) return blobUrl(id);
+  }
+  return "";
+}
 const ORG_KIND="mc-finance-club-structure";
 const ORG_VER=1;
 const CH_STATUS=[
@@ -1565,7 +1651,7 @@ function chStatus(id){
 }
 function emptyOrg(){
   return {national:{name:"",code:"",country:"South Africa",seat:"",
-                    formed:"",contact:"",note:""},
+                    formed:"",contact:"",note:"",logo:""},
           regions:[], at:"", by:""};
 }
 /* Nothing here trusts what it is handed. A tree out of a file, an old
@@ -1579,6 +1665,9 @@ function normOrg(t){
   ["name","code","country","seat","formed","contact","note"].forEach(function(k){
     if(n[k]!=null) o.national[k]=String(n[k]).slice(0,160);
   });
+  /* Not run through the slicing above: a badge is a picture, not a line of
+     text, and anything that is not one is dropped rather than half kept. */
+  o.national.logo = isCrest(n.logo)? n.logo : "";
   o.at=String(t.at||""); o.by=String(t.by||"");
   const seen={};
   o.regions=(Array.isArray(t.regions)?t.regions:[]).map(function(r){
@@ -1601,6 +1690,7 @@ function normOrg(t){
           formed:String(c.formed||"").slice(0,10),
           status:chStatus(c.status).id,
           note:String(c.note||"").slice(0,400),
+          logo:isCrest(c.logo)? c.logo : "",
           /* Names this charter used to answer to. A charter that is renamed
              would otherwise orphan every return already filed under the old
              name, because a return is matched by name and nothing else. */
@@ -1644,6 +1734,36 @@ function orgNational(){ return orgTree().national; }
 function clubTitle(){ return orgNational().name || "The club"; }
 function orgRegionById(id){
   return orgTree().regions.find(function(r){ return r.id===id; })||null;
+}
+/* A list of the club's charters to pick from, grouped by the region each one
+   rides in, so a charter is chosen off the structure rather than typed. A
+   name already set that is not on the structure is kept and shown as such,
+   because quietly dropping it would lose whatever it was attached to. */
+function charterPicker(idAttr,cur,opts){
+  opts=opts||{};
+  cur=String(cur||"");
+  const all=orgCharters();
+  const sel=el("select",opts.onchange? {id:idAttr,onchange:opts.onchange} : {id:idAttr});
+  const known=all.some(function(x){ return slug(x.ch.name)===slug(cur); });
+  if(opts.blank) sel.append(el("option",{value:"",selected:(!cur)?true:null},opts.blank));
+  if(cur && !known)
+    sel.append(el("option",{value:cur,selected:true},cur+"  \u2014 not on the structure"));
+  const byRegion={}, order=[];
+  all.forEach(function(x){
+    if(!byRegion[x.region.name]){ byRegion[x.region.name]=[]; order.push(x.region.name); }
+    byRegion[x.region.name].push(x.ch);
+  });
+  order.forEach(function(rn){
+    const g=el("optgroup",{label:rn});
+    byRegion[rn].forEach(function(ch){
+      g.append(el("option",{value:ch.name,
+        selected:(known && slug(ch.name)===slug(cur))?true:null},
+        ch.name+(ch.code? ("  ("+ch.code+")") : "")
+        +(ch.status&&ch.status!=="active"? ("  \u2014 "+chStatus(ch.status).label) : "")));
+    });
+    sel.append(g);
+  });
+  return sel;
 }
 function orgCharters(){
   const out=[];
@@ -4359,8 +4479,11 @@ async function statementPicture(m){
   const tout=rows.reduce((s,e)=>s+(Number(e.out)||0),0);
 
   try{ if(document.fonts&&document.fonts.ready) await document.fonts.ready; }catch(e){}
+  /* The club's badge on the left, this charter's own on the right - taken
+     off the structure, so a statement printed for another charter carries
+     that charter's badge and not this device's. */
   const [logo,logo2]=await Promise.all([
-    loadImg(c.logoId?blobUrl(c.logoId):""), loadImg(c.logo2Id?blobUrl(c.logo2Id):"")]);
+    loadImg(clubCrestSrc()), loadImg(charterCrestSrc())]);
 
   const S2=2;                        // draw at twice the size so it stays sharp
   const W=1000, PAD=44, ROW=30;
@@ -7475,8 +7598,8 @@ function renderBrand(){
   const c=$("#crest"); c.textContent="";
   /* A charter's own badge on its own screen. Falls back to the club badge
      for a charter that has not been given one yet. */
-  const crestId=(S.club&&(S.club.logo2Id||S.club.logoId))||"";
-  if(crestId) c.append(el("img",{src:blobUrl(crestId),alt:""}));
+  const crestSrc=charterCrestSrc()||clubCrestSrc();
+  if(crestSrc) c.append(el("img",{src:crestSrc,alt:""}));
   else c.append(el("span",{},(S.club?S.club.name:"B").slice(0,1).toUpperCase()));
   renderCharterPicker();
   const sd=(S.club&&S.club.statementDate)||"";
@@ -10967,6 +11090,13 @@ function orgCharterRow(reg,c,i,n){
   const late=c.status==="active" && ret && String(ret.month||"")!==mth;
   return el("div",{class:"row",
     style:"align-items:center;gap:9px;padding:8px 0;border-top:1px solid var(--line)"},
+    el("div",{style:"flex:0 0 auto;width:34px;height:34px"},
+      isCrest(c.logo)
+        ? el("img",{src:c.logo,alt:"",style:"width:34px;height:34px;object-fit:contain;"
+            +"border-radius:5px;background:#fff"})
+        : el("div",{style:"width:34px;height:34px;border-radius:5px;border:1px dashed var(--line);"
+            +"display:grid;place-items:center;font-size:13px;color:var(--muted);"
+            +"font-family:var(--fd)"},(c.name||"?").slice(0,1).toUpperCase())),
     el("div",{style:"flex:1 1 190px;min-width:0"},
       el("div",{class:"row",style:"align-items:center;gap:7px"},
         c.code? el("span",{class:"cat",style:"font-family:var(--fd);letter-spacing:.06em"},c.code):null,
@@ -11043,12 +11173,17 @@ function viewOrg(){
       orgCan()? el("button",{class:"btn",style:"margin-left:10px",
         onclick:orgNationalModal},"Edit") : null),
     el("div",{class:"body",style:"display:flex;flex-direction:column;gap:13px"},
-      el("div",{style:"font-size:12.5px;color:var(--muted)"},
-        [nat.seat? ("National office: "+nat.seat) : null,
-         nat.country||null,
-         nat.formed? ("founded "+fdate(nat.formed)) : null,
-         nat.contact||null].filter(Boolean).join("  ·  ")
-        || "National has not been filled in yet."),
+      el("div",{class:"row",style:"gap:13px;align-items:center"},
+        isCrest(nat.logo)
+          ? el("img",{src:nat.logo,alt:"",style:"width:62px;height:62px;flex:0 0 auto;"
+              +"object-fit:contain;border-radius:6px;background:#fff"})
+          : null,
+        el("div",{style:"flex:1 1 180px;min-width:0;font-size:12.5px;color:var(--muted)"},
+          [nat.seat? ("National office: "+nat.seat) : null,
+           nat.country||null,
+           nat.formed? ("founded "+fdate(nat.formed)) : null,
+           nat.contact||null].filter(Boolean).join("  ·  ")
+          || "National has not been filled in yet.")),
       nat.note? el("div",{class:"note"},nat.note) : null,
       el("div",{class:"tiles"},
         el("div",{class:"tile hero"},el("span",{class:"v"},String(st.regions)),
@@ -11096,6 +11231,43 @@ function viewOrg(){
   return out;
 }
 /* ---------------- the editors ---------------- */
+/* One badge, chosen and shown. Used by National and by every charter, so
+   they behave the same and are cut down the same way. */
+function crestPicker(cur,label){
+  let val = isCrest(cur)? cur : "";
+  const shown = el("div",{style:"flex:0 0 auto"});
+  const rm = el("button",{class:"btn ghost",type:"button",style:"font-size:12px;margin-top:6px",
+    onclick:function(){ val=""; paint(); toast(label+" taken off."); }},"Remove");
+  const input = el("input",{type:"file",accept:"image/png,image/jpeg,image/webp",
+    style:"font-size:12px",onchange:async function(ev){
+      const f=ev.target.files&&ev.target.files[0];
+      ev.target.value="";
+      if(!f) return;
+      try{
+        val=await crestFromFile(f);
+        paint();
+        toast(label+" set — "+Math.max(1,Math.round(val.length/1024))+" KB.");
+      }catch(e){ toast((e&&e.message)||"Could not use that picture.",true); }
+    }});
+  function paint(){
+    shown.textContent="";
+    shown.append(val
+      ? el("img",{src:val,alt:"",style:"width:80px;height:80px;object-fit:contain;"
+          +"border-radius:5px;background:#fff;border:1px solid var(--line)"})
+      : el("div",{class:"logoslot",style:"width:80px;height:80px;min-height:0"},label));
+    rm.hidden = !val;
+  }
+  paint();
+  return {
+    el: el("div",{class:"row",style:"gap:12px;align-items:flex-start"}, shown,
+      el("div",{style:"flex:1 1 190px"},
+        el("div",{style:"font-size:12px;color:var(--muted);margin-bottom:5px"},
+          "PNG or JPEG. It is cut down to badge size on the way in, and it "
+          +"travels with the structure."),
+        input, rm)),
+    value: function(){ return val; }
+  };
+}
 function orgNationalModal(){
   if(!orgCan()){ toast("Only the Overall Admin lays out the club.",true); return; }
   const n=orgTree().national;
@@ -11108,6 +11280,7 @@ function orgNationalModal(){
     contact:el("input",{type:"text",id:"on-contact",value:n.contact,placeholder:"National secretary, phone or e-mail"}),
     note:el("textarea",{id:"on-note",rows:"2"},n.note)
   };
+  const crest=crestPicker(n.logo,"Club badge");
   modal("National",[
     el("div",{class:"note"},el("b",{},"The top of the club."),
       " This is the club itself, not this charter. It names every page that "
@@ -11120,7 +11293,10 @@ function orgNationalModal(){
       el("label",{class:"f",style:"flex:1 1 150px"},el("span",{},"National office"),f.seat),
       el("label",{class:"f",style:"flex:0 1 150px"},el("span",{},"Founded"),f.formed)),
     el("label",{class:"f"},el("span",{},"Who to ask at National"),f.contact),
-    el("label",{class:"f"},el("span",{},"Anything the club should know"),f.note)
+    el("label",{class:"f"},el("span",{},"Anything the club should know"),f.note),
+    el("label",{class:"f"},el("span",{},"Club badge"),crest.el,
+      el("span",{style:"font-size:11.5px;color:var(--muted)"},
+        "Prints on the left of every report, under every charter.")),
   ],[el("div",{class:"spacer"}),
      el("button",{class:"btn",onclick:closeModal},"Cancel"),
      el("button",{class:"btn primary",onclick:function(){
@@ -11128,7 +11304,7 @@ function orgNationalModal(){
          t.national={name:f.name.value.trim(), code:f.code.value.trim(),
            country:f.country.value.trim(), seat:f.seat.value.trim(),
            formed:f.formed.value, contact:f.contact.value.trim(),
-           note:f.note.value.trim()};
+           note:f.note.value.trim(), logo:crest.value()};
        }).then(function(){ closeModal(); toast("National saved."); });
      }},"Save")]);
 }
@@ -11196,7 +11372,7 @@ function orgCharterModal(regionId,chId){
   const reg=t.regions.find(function(x){ return x.id===regionId; });
   if(!reg){ toast("That region is gone.",true); return; }
   const c=chId? ((reg.charters||[]).find(function(x){ return x.id===chId; })||null) : null;
-  const cur=c||{name:"",code:"",town:"",formed:"",status:"active",note:"",aka:[]};
+  const cur=c||{name:"",code:"",town:"",formed:"",status:"active",note:"",aka:[],logo:""};
   const was=cur.name;
   const f={
     name:el("input",{type:"text",id:"oc-name",value:cur.name,placeholder:"Charter name"}),
@@ -11210,6 +11386,7 @@ function orgCharterModal(regionId,chId){
       return el("option",{value:r.id,selected:r.id===regionId?true:null},r.name); })),
     note:el("textarea",{id:"oc-note",rows:"2"},cur.note)
   };
+  const crest=crestPicker(cur.logo,"Charter badge");
   const ret=c? latestReturn(cur.name) : null;
   modal(c? ("Charter — "+cur.name) : ("Add a charter to "+reg.name),[
     el("div",{class:"row",style:"gap:10px"},
@@ -11223,6 +11400,10 @@ function orgCharterModal(regionId,chId){
       el("span",{style:"font-size:11.5px;color:var(--muted)"},
         "Change this to move the charter. Everything it has sent up moves with it.")),
     el("label",{class:"f"},el("span",{},"Note"),f.note),
+    el("label",{class:"f"},el("span",{},"Charter badge"),crest.el,
+      el("span",{style:"font-size:11.5px;color:var(--muted)"},
+        "Prints on the right of this charter's own reports and statements, "
+        +"whoever is looking at them.")),
     (cur.aka&&cur.aka.length)? el("div",{style:"font-size:12px;color:var(--muted)"},
       "Also answers to: "+cur.aka.join(", ")) : null,
     ret? el("div",{class:"note"},el("b",{},"Last return "+monthName(String(ret.month||""))+"."),
@@ -11258,7 +11439,7 @@ function orgCharterModal(regionId,chId){
         if(!from||!dest) return false;
         const patch={name:nm, code:f.code.value.trim(), town:f.town.value.trim(),
                      formed:f.formed.value, status:f.status.value,
-                     note:f.note.value.trim()};
+                     note:f.note.value.trim(), logo:crest.value()};
         if(chId){
           const x=(from.charters||[]).find(function(y){ return y.id===chId; });
           if(!x) return false;
@@ -14693,9 +14874,81 @@ function viewSettings(){
   const c=S.club;
   const f={};
   const txt=(k,ph)=>f[k]=el("input",{type:"text",id:"s-"+k,value:c[k]||"",placeholder:ph||""});
+  /* The name that signs every statement. It is one of the men on the roll,
+     so it is picked off the roll rather than typed: a treasurer who has
+     been spelled two ways is a treasurer nobody can look up. */
+  function treasurerField(){
+    const roll=(S.members||[]).filter(function(m){ return m.active!==false; });
+    if(!roll.length){
+      const box=txt("treasurer","Name on the statement");
+      return box;
+    }
+    const cur=String(c.treasurer||"");
+    const nameOf=function(m){
+      const full=[m.firstName,m.surname].filter(Boolean).join(" ");
+      return m.knownAs? (m.knownAs+(full? (" \u2014 "+full) : "")) : (full||m.id);
+    };
+    const known=roll.some(function(m){ return nameOf(m)===cur; });
+    const sel=el("select",{id:"s-treasurer"});
+    sel.append(el("option",{value:"",selected:(!cur)?true:null},"\u2014 nobody set \u2014"));
+    if(cur && !known)
+      sel.append(el("option",{value:cur,selected:true},cur+"  \u2014 not on the roll"));
+    roll.forEach(function(m){
+      const n=nameOf(m);
+      sel.append(el("option",{value:n,selected:(known&&n===cur)?true:null},
+        n+(m.status? ("  ("+m.status+")") : "")));
+    });
+    f.treasurer=sel;
+    return sel;
+  }
+  /* This charter's name is what its returns are filed under and what the
+     structure matches on, so a typo here quietly stops a charter's returns
+     finding their way home. Once the club's structure has charters on it,
+     this stops being a box to type in and becomes the list of them. */
+  function charterNameField(){
+    const all=orgCharters();
+    if(!all.length){
+      /* Nothing laid out yet - somebody has to be able to name this charter
+         before there is a structure to pick it off. */
+      const box=txt("name");
+      box.placeholder="This charter's name";
+      return box;
+    }
+    const cur=String(c.name||"");
+    const known=all.some(function(x){ return slug(x.ch.name)===slug(cur); });
+    const sel=el("select",{id:"s-name"});
+    if(!cur || !known){
+      sel.append(el("option",{value:cur,selected:true},
+        cur? (cur+"  \u2014 not on the structure") : "Which charter is this?"));
+    }
+    const byRegion={};
+    all.forEach(function(x){
+      (byRegion[x.region.name]=byRegion[x.region.name]||[]).push(x.ch); });
+    Object.keys(byRegion).forEach(function(rn){
+      const g=el("optgroup",{label:rn});
+      byRegion[rn].forEach(function(ch){
+        g.append(el("option",{value:ch.name,
+          selected:(known && slug(ch.name)===slug(cur))?true:null},
+          ch.name+(ch.code? ("  ("+ch.code+")") : "")
+          +(ch.status&&ch.status!=="active"? ("  \u2014 "+chStatus(ch.status).label) : "")));
+      });
+      sel.append(g);
+    });
+    f.name=sel;
+    return sel;
+  }
   const saveDetails=()=>{
     const patch={};
     ["name","subtitle","legalName","treasurer","bankName","bankAccount","bankBranch","bankRef","footerNote"].forEach(k=>{ if(f[k]) patch[k]=f[k].value.trim(); });
+    /* Picked off the structure rather than typed: take its region and its
+       code with it, so the charter does not have to be told twice and the
+       two can never drift apart. */
+    const picked=orgCharters().filter(function(x){
+      return slug(x.ch.name)===slug(patch.name||""); })[0];
+    if(picked){
+      patch.region=picked.region.name;
+      patch.charterCode=picked.ch.code||"";
+    }
     patch.statementDate=f.statementDate.value;
     patch.opening=Math.round((parseFloat(f.opening.value)||0)*100)/100;
     saveClub(patch).then(()=>{ toast("Club details saved."); renderAll(); });
@@ -14814,10 +15067,12 @@ function viewSettings(){
   return [
     (function(){
       const side=(which)=>{
-        const id = which==="charter"? c.logo2Id : c.logoId;
+        /* What will actually print, which is the structure's badge where
+           there is one and this device's where there is not. */
+        const src = which==="charter"? charterCrestSrc() : clubCrestSrc();
         return el("div",{class:"lh-"+which},
-          id? el("img",{src:blobUrl(id),alt:""})
-            : el("div",{class:"logoslot"}, which==="charter"?"Charter logo":"Club logo"));
+          src? el("img",{src:src,alt:""})
+             : el("div",{class:"logoslot"}, which==="charter"?"Charter logo":"Club logo"));
       };
       return el("section",{class:"panel"},
         el("header",{},el("h2",{},"Letterhead"),el("div",{class:"spacer"}),
@@ -14832,6 +15087,12 @@ function viewSettings(){
                 el("div",{class:"s2"},"As at "+fdate(asAt()))),
               side("charter"))),
           S.assets?null:el("div",{class:"note bad"},"Logo upload needs edit access to this app."),
+          el("div",{class:"note"},el("b",{},"Badges live on the structure now."),
+            " Set the club's badge and each charter's on the ",
+            el("a",{href:"#",onclick:function(ev){ ev.preventDefault(); go("org"); }},"Structure"),
+            " screen, and they follow the charter wherever its reports are "
+            +"opened. What is set below is only used for this charter, on "
+            +"this device, when the structure has no badge for it."),
           el("div",{class:"grid2"},logoField(1),logoField(2)),
           fontField(),
           el("div",{style:"font-size:12.5px;color:var(--muted)"},
@@ -14841,11 +15102,11 @@ function viewSettings(){
     el("section",{class:"panel"},el("header",{},el("h2",{},"Club details")),
       el("div",{class:"body",style:"display:flex;flex-direction:column;gap:12px"},
         el("div",{class:"grid3"},
-          el("label",{class:"f"},el("span",{},"Club name"),txt("name")),
+          el("label",{class:"f"},el("span",{},"This charter"),charterNameField()),
           el("label",{class:"f"},el("span",{},"Strapline"),txt("subtitle","Club books")),
           el("label",{class:"f"},el("span",{},"Full name on reports"),txt("legalName"))),
         el("div",{class:"grid3"},
-          el("label",{class:"f"},el("span",{},"Treasurer"),txt("treasurer","Name on the statement")),
+          el("label",{class:"f"},el("span",{},"Treasurer"),treasurerField()),
           el("label",{class:"f"},el("span",{},"Statement date"),f.statementDate),
           el("label",{class:"f"},el("span",{},"Club opening balance"),f.opening)),
         el("div",{class:"grid3"},
@@ -15574,6 +15835,11 @@ function memberModal(id){
   f.noCharge=el("input",{type:"checkbox",id:"m-nocharge",checked:m.noCharge?true:null});
   f.chargeFrom=el("input",{type:"month",id:"m-chargefrom",value:m.chargeFrom||""});
   f.patchedOn=el("input",{type:"date",id:"m-patched",value:patchedOn(m)||""});
+  /* Which charter he rides with. Picked off the structure so it always
+     matches a charter the club actually has, and so a man moved between
+     charters is moved to one that exists. */
+  f.charter=charterPicker("m-charter", m.charter||myCharter(),
+    {blank:orgCharters().length? "\u2014 not set \u2014" : null});
   const body=[
     photo.node,
     el("div",{class:"grid3"},
@@ -15584,6 +15850,10 @@ function memberModal(id){
       el("label",{class:"f"},el("span",{},"Rank"),f.status),
       el("label",{class:"f"},el("span",{},"Phone"),t("phone")),
       el("label",{class:"f"},el("span",{},"Email"),t("email"))),
+    (mineOnly||!orgCharters().length)? null : el("label",{class:"f"},
+      el("span",{},"Charter"),f.charter,
+      el("span",{style:"font-size:11.5px;color:var(--muted)"},
+        "From the club's structure, by region.")),
     mineOnly? null : el("div",{class:"grid2"},
       el("label",{class:"f"},el("span",{},"The day he got his patch"),f.patchedOn),
       el("div",{style:"font-size:12px;color:var(--muted);align-self:end;padding-bottom:9px"},
@@ -15641,6 +15911,7 @@ function memberModal(id){
             address:addrLines(f.address.value).join("\n"), photoId:photo.id(),
             active:f.active.checked, opening:Math.round((parseFloat(f.opening.value)||0)*100)/100,
             noCharge:f.noCharge.checked, chargeFrom:f.chargeFrom.value||"",
+            charter:(f.charter&&f.charter.value)||m.charter||"",
             /* keep the rest of his prospect record exactly as it stands */
             prospect: Object.assign({}, pros(m), {patchedOn: f.patchedOn.value||""}) };
       if(!id && S.members.some(x=>x.id===rec.id)) rec.id = rec.id+"-"+Math.random().toString(36).slice(2,5);
@@ -16077,10 +16348,10 @@ function figEventOverall(t){
 
 /* ============================ printing ============================ */
 function logoSide(which){
-  const id = which==="charter" ? S.club.logo2Id : S.club.logoId;
+  const src = which==="charter" ? charterCrestSrc() : clubCrestSrc();
   return el("div",{class:"lg "+which},
-    id? el("img",{src:blobUrl(id),alt:""})
-      : el("div",{class:"logoslot-print"}, which==="charter"?"Charter logo":"Club logo"));
+    src? el("img",{src:src,alt:""})
+       : el("div",{class:"logoslot-print"}, which==="charter"?"Charter logo":"Club logo"));
 }
 function docHead(title,sub){
   return el("div",{class:"dochead"},
@@ -16490,10 +16761,10 @@ function coverPage(){
   const st=summaryStats();
   const c=S.club;
   const side=(which)=>{
-    const id = which==="c2"? c.logo2Id : c.logoId;
+    const src = which==="c2"? charterCrestSrc() : clubCrestSrc();
     return el("div",{class:which},
-      id? el("img",{src:blobUrl(id),alt:""})
-        : el("div",{class:"logoslot-print"}, which==="c2"?"Charter logo":"Club logo"));
+      src? el("img",{src:src,alt:""})
+         : el("div",{class:"logoslot-print"}, which==="c2"?"Charter logo":"Club logo"));
   };
   return el("div",{class:"docpage cover"},
     el("div",{class:"crests"}, side("c1"), side("c2")),
