@@ -734,6 +734,20 @@ window.__MCF_SERVER__ = {
   /* The whole roll, every man, login or no login - so a role can be set
      against him the day he is put on the roll instead of the day he first
      signs in. */
+  /* Hand a man his sign-in. The password is made by the database and comes
+     back once - it is never stored anywhere the app can read it again. */
+  createLogin: function(charterId, memberId){
+    return sb.rpc("create_login",{charter:charterId, mem:memberId}).then(function(r){
+      if(r.error) throw refused(r.error);
+      return r.data;
+    });
+  },
+  resetLogin: function(charterId, memberId){
+    return sb.rpc("reset_login",{charter:charterId, mem:memberId}).then(function(r){
+      if(r.error) throw refused(r.error);
+      return r.data;
+    });
+  },
   listRoll: function(){
     return sb.rpc("all_roll").then(function(r){
       if(r.error) throw refused(r.error);
@@ -15522,6 +15536,41 @@ function permPeople(){
       el("div",{class:"body"},body))];
 }
 
+/* The one time anybody sees it.
+   The password is made by the database and handed back once. It is not kept
+   anywhere the app can read again, and the man must change it at the door, so
+   this card is the only chance to write it down. */
+function loginHandover(res,isReset){
+  const pw=res.password||"";
+  const body=[
+    el("div",{class:"note"},
+      el("b",{},isReset? "A new password for " : "A login for "),
+      el("b",{},res.knownAs||"him"),
+      el("div",{style:"margin-top:5px"},
+        "He signs in with ",el("b",{},res.email||"his email address"),
+        " and the password below."),
+      el("div",{style:"margin-top:5px;color:var(--muted)"},
+        "The app will stop him at the door and make him set his own before he can"
+        +" do anything. You will not see what he chooses.")),
+    el("div",{style:"border:1px solid var(--line);border-radius:4px;padding:16px;"
+      +"text-align:center;margin:12px 0"},
+      el("div",{class:"eyebrow",style:"margin-bottom:8px"},"Temporary password"),
+      el("div",{id:"pw-once",style:"font-family:ui-monospace,Menlo,Consolas,monospace;"
+        +"font-size:26px;letter-spacing:2px;font-weight:700;word-break:break-all"},pw)),
+    el("div",{class:"note bad"},
+      el("b",{},"Write it down now."),
+      " It is not stored and it cannot be shown again. If it is lost, give him"
+      +" another one from the same button.")];
+  const foot=[
+    el("button",{class:"btn",onclick:function(){
+      try{ navigator.clipboard.writeText(pw); toast("Copied."); }
+      catch(e){ toast("Copy it off the screen.",true); }
+    }},"Copy the password"),
+    el("div",{class:"spacer"}),
+    el("button",{class:"btn primary",onclick:closeModal},"I have written it down")];
+  modal(isReset? "Password reset" : "Login made", body, foot);
+}
+
 function permRollRow(r,chairRoles,byMember,charters,regions,offs,redraw){
   const held=(r.offices||[]).slice();
   const prof=byMember[r.memberId];
@@ -15588,11 +15637,48 @@ function permRollRow(r,chairRoles,byMember,charters,regions,offs,redraw){
         ? (r.mustChangePassword? el("span",{class:"cat"},"Temporary password")
                                : el("span",{class:"cat"},"Signs in"))
         : el("span",{class:"cat",style:"border-color:var(--warn);color:var(--warn)"},"No login yet"),
+      /* Making the sign-in and handing over a fresh password both happen
+         here, so nobody has to go near the database to let a brother in. */
+      loginButton(r),
       prof? el("button",{class:"btn"+(open?" primary":""),onclick:function(){
         S.permOpen=open?null:("m:"+r.memberId); renderAll(); }}, open?"Close":"More") : null),
     chips, err);
   if(open && prof) card.append(permPersonForm(prof,offs,charters,regions));
   return card;
+}
+
+/* Make his login, or hand him a new password. Either way the database does
+   the work and gives the password back once. */
+function loginButton(r){
+  const srv=window.__MCF_SERVER__;
+  if(!(srv && srv.createLogin)) return null;
+  if(!r.hasLogin && !(r.email||"").trim()){
+    return el("span",{style:"font-size:11.5px;color:var(--muted)"},"Needs an email first");
+  }
+  const label = r.hasLogin? "New password" : "Make his login";
+  return el("button",{class:"btn",onclick:function(e){
+    const btn=e.target;
+    const go=function(){
+      btn.disabled=true; btn.textContent="Working\u2026";
+      const call = r.hasLogin? srv.resetLogin(r.charterId,r.memberId)
+                             : srv.createLogin(r.charterId,r.memberId);
+      call.then(function(res){
+        if(res && res.roll) S.perm.roll=res.roll;
+        renderAll();
+        loginHandover(res, !!r.hasLogin);
+      }).catch(function(x){
+        btn.disabled=false; btn.textContent=label;
+        toast(String((x&&x.message)||x),true);
+      });
+    };
+    if(r.hasLogin){
+      askConfirm("A new password for "+(r.knownAs||"him")+"?",
+        ["The one he has now stops working the moment you press this.",
+         "He will be shown the new one on screen and must change it when he next"
+         +" opens the app."],
+        "Give him a new password", go);
+    } else { go(); }
+  }},label);
 }
 
 function permPersonForm(p,offs,charters,regions){
