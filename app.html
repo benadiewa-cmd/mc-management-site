@@ -731,6 +731,22 @@ window.__MCF_SERVER__ = {
      database, which decides for itself whether this man may; none of these
      carry a right of their own. The two "save" calls hand back the whole
      fresh list, so the screen never has to guess what it just did. */
+  /* The whole roll, every man, login or no login - so a role can be set
+     against him the day he is put on the roll instead of the day he first
+     signs in. */
+  listRoll: function(){
+    return sb.rpc("all_roll").then(function(r){
+      if(r.error) throw refused(r.error);
+      return r.data || [];
+    });
+  },
+  saveMemberRole: function(charterId, memberId, offices){
+    return sb.rpc("save_member_role",
+      {charter:charterId, mem:memberId, offs:offices||[]}).then(function(r){
+      if(r.error) throw refused(r.error);
+      return r.data || [];
+    });
+  },
   listPeople: function(){
     return sb.rpc("all_people").then(function(r){
       if(r.error) throw refused(r.error);
@@ -3869,6 +3885,24 @@ function meetingsSince(months){
 }
 /* A meeting with nobody marked tells us nothing, and counting it would make
    every man look like he was missing. */
+/* Who else was in the room.
+   The roll is the roll, but a meeting is rarely only the roll. The Familia
+   sit in on the ones that concern them, and there is almost always somebody
+   from another charter or another club at the table. Neither can be fined and
+   neither counts towards quorum - they are recorded because the minutes
+   should say who was there, and a year later nobody remembers. */
+function famPresent(m){ return (m&&Array.isArray(m.famPresent))? m.famPresent : []; }
+function visitorsOf(m){
+  const v=(m&&Array.isArray(m.visitors))? m.visitors : [];
+  return v.filter(function(x){ return x && (x.name||"").trim(); });
+}
+function cleanVisitors(list){
+  return (list||[]).map(function(v){
+    return {name:String(v.name||"").trim(), from:String(v.from||"").trim()};
+  }).filter(function(v){ return v.name; });
+}
+function visitorLine(v){ return v.name + (v.from? (" \u2014 "+v.from) : ""); }
+function guestCount(m){ return famPresent(m).length + visitorsOf(m).length; }
 function attendanceTaken(m){
   if(!m) return false;
   return ((m.present||[]).length + (m.apologies||[]).length + (m.noshow||[]).length) > 0;
@@ -4110,6 +4144,83 @@ function minuteModal(id){
     el("button",{class:"btn",style:"font-size:11.5px;padding:3px 9px",onclick:()=>markAll("noshow")},"Everyone a no show"),
     el("button",{class:"btn ghost",style:"font-size:11.5px;padding:3px 9px",onclick:()=>markAll("")},"Clear"));
 
+  /* ---- who else was in the room ----
+     The Familia, ticked off the list the charter already keeps, and anybody
+     else typed in by hand. Neither can be fined and neither counts towards
+     quorum; they are here so the minutes say who was at the table. */
+  const fam=famPresent(m).slice();
+  const famBox=el("div",{style:"display:flex;flex-direction:column;gap:2px;max-height:200px;"
+    +"overflow:auto;border:1px solid var(--line);border-radius:4px;padding:8px"});
+  const famTally=el("div",{style:"font-size:12px;color:var(--muted);margin-top:6px"});
+  function countFam(){
+    famTally.textContent = fam.length
+      ? (fam.length+" of the Familia "+(fam.length===1?"was":"were")+" there")
+      : "Nobody off the Familia marked.";
+  }
+  function drawFam(){
+    famBox.textContent="";
+    const rows=(S.family||[]).slice().sort(function(a,b){
+      return String(a.name||"").localeCompare(String(b.name||"")); });
+    if(!rows.length){
+      famBox.append(el("div",{style:"font-size:12.5px;color:var(--muted)"},
+        "Nobody on the Familia yet. Add wives, partners and children under Familia and"
+        +" they can be marked off here."));
+      countFam(); return;
+    }
+    rows.forEach(function(f){
+      const on=fam.indexOf(f.id)>=0;
+      const rider=member(f.memberId);
+      famBox.append(el("label",{class:"row",
+        style:"gap:9px;align-items:center;padding:4px 3px;border-bottom:1px solid var(--line);cursor:pointer"},
+        el("input",{type:"checkbox",checked:on?true:null,onchange:function(e){
+          const at=fam.indexOf(f.id);
+          if(e.target.checked){ if(at<0) fam.push(f.id); } else if(at>=0) fam.splice(at,1);
+          countFam();
+        }}),
+        el("div",{style:"flex:1 1 auto;min-width:0;font-size:12.5px"},
+          el("b",{},f.name||"\u2014"),
+          el("span",{style:"color:var(--muted)"},
+            (f.rel? ("  \u00b7  "+f.rel) : "")
+            + (rider? ("  \u00b7  "+rider.knownAs) : "")))));
+    });
+    countFam();
+  }
+  drawFam();
+  const famTools=el("div",{class:"row",style:"gap:8px;margin-top:7px"},
+    el("button",{class:"btn",style:"font-size:11.5px;padding:3px 9px",onclick:function(){
+      fam.length=0; (S.family||[]).forEach(function(f){ fam.push(f.id); }); drawFam(); }},
+      "All of them"),
+    el("button",{class:"btn ghost",style:"font-size:11.5px;padding:3px 9px",onclick:function(){
+      fam.length=0; drawFam(); }},"Clear"));
+
+  const vis=visitorsOf(m).map(function(v){ return {name:v.name||"",from:v.from||""}; });
+  const visBox=el("div",{style:"display:flex;flex-direction:column;gap:7px"});
+  function drawVis(){
+    visBox.textContent="";
+    vis.forEach(function(v,i){
+      visBox.append(el("div",{class:"row",style:"gap:8px;align-items:flex-end"},
+        el("label",{class:"f",style:"flex:1 1 150px;margin:0"},
+          el("span",{},i===0?"Name":""),
+          el("input",{type:"text",id:"mt-vn-"+i,value:v.name,placeholder:"His name",
+            style:"font-size:12px",oninput:function(e){ v.name=e.target.value; }})),
+        el("label",{class:"f",style:"flex:1 1 150px;margin:0"},
+          el("span",{},i===0?"Where from":""),
+          el("input",{type:"text",id:"mt-vf-"+i,value:v.from,
+            placeholder:"Charter, club or nothing",style:"font-size:12px",
+            oninput:function(e){ v.from=e.target.value; }})),
+        el("button",{class:"btn ghost danger",style:"font-size:11.5px;padding:3px 9px",
+          onclick:function(){ vis.splice(i,1); drawVis(); }},"Remove")));
+    });
+    if(!vis.length) visBox.append(el("div",{style:"font-size:12.5px;color:var(--muted)"},
+      "Nobody from outside recorded."));
+  }
+  drawVis();
+  const visTools=el("div",{class:"row",style:"gap:8px;margin-top:7px"},
+    el("button",{class:"btn",style:"font-size:11.5px;padding:3px 9px",onclick:function(){
+      vis.push({name:"",from:""}); drawVis();
+      const last=document.getElementById("mt-vn-"+(vis.length-1)); if(last) last.focus();
+    }},"Add a visitor"));
+
   const body=[
     el("div",{class:"grid3"},
       el("label",{class:"f"},el("span",{},"Date"),f.date),
@@ -4126,6 +4237,17 @@ function minuteModal(id){
         "Tap a brother's state. An apology needs a reason. Fines for apologies and no shows are raised from the meeting page once the minutes are saved."),
       quorumBox,
       roll, tally, rollTools),
+    /* The roll above is the charter. These two are everybody else at the
+       table - neither is fined and neither counts towards quorum. */
+    el("div",{},el("span",{class:"eyebrow"},"The Familia"),
+      el("div",{style:"font-size:12px;color:var(--muted);margin:3px 0 7px"},
+        "Tick whoever came. They are not fined and they do not count towards quorum."),
+      famBox, famTally, famTools),
+    el("div",{},el("span",{class:"eyebrow"},"Visitors"),
+      el("div",{style:"font-size:12px;color:var(--muted);margin:3px 0 7px"},
+        "Anybody from outside the charter \u2014 another charter, another club, a guest."
+        +" Type the name; where he is from is worth putting in if you know it."),
+      visBox, visTools),
     el("label",{class:"f"},el("span",{},"Minutes"),f.body),
     el("div",{},
       el("span",{class:"eyebrow"},"Points raised"),
@@ -4167,6 +4289,8 @@ function minuteModal(id){
         noshow:Object.keys(att).filter(k=>att[k]==="noshow"),
         reasons:(function(){ const o={}; Object.keys(att).forEach(k=>{
           if(att[k]==="apology" && (reason[k]||"").trim()) o[k]=reason[k].trim(); }); return o; })(),
+        famPresent: fam.slice(),
+        visitors: cleanVisitors(vis),
         fines: Object.assign({}, m.fines||{}),
         noFine: (function(){ const out=[];
           Object.keys(att).forEach(k=>{
@@ -4524,7 +4648,8 @@ function viewMinute(){
         el("span",{style:"font-size:12px;color:var(--muted)"},
           (m.present||[]).length+" present \u00b7 "+(m.apologies||[]).length+" apolog"
           +((m.apologies||[]).length===1?"y":"ies")+" \u00b7 "+(m.noshow||[]).length+" no show"
-          +((m.noshow||[]).length===1?"":"s"))),
+          +((m.noshow||[]).length===1?"":"s")
+          +(guestCount(m)? ("  \u2014  "+guestCount(m)+" more at the table") : ""))),
       el("div",{class:"body",style:"display:flex;flex-direction:column;gap:12px"},
         el("div",{},el("div",{class:"eyebrow"},"Present ("+(m.present||[]).length+")"),el("div",{},nm(m.present))),
         (function(){
@@ -4556,7 +4681,23 @@ function viewMinute(){
                       ? el("button",{class:"btn",style:"padding:3px 10px;font-size:11.5px",
                           onclick:()=>fineModal(m,r.id,r.state)},"Fine him")
                       : el("span",{style:"color:var(--muted)"},"Not fined"))))))));
-        })())),
+        })(),
+        /* Everybody else who was at the table. */
+        (famPresent(m).length||visitorsOf(m).length)? el("div",{
+          style:"border-top:1px solid var(--line);padding-top:11px;display:flex;"
+            +"flex-direction:column;gap:9px"},
+          famPresent(m).length? el("div",{},
+            el("div",{class:"eyebrow"},"The Familia ("+famPresent(m).length+")"),
+            el("div",{},famPresent(m).map(function(fid){
+              const f=famById(fid); if(!f) return fid;
+              const r=member(f.memberId);
+              return f.name+(f.rel?(" ("+f.rel+")"):"")+(r?(" \u2014 "+r.knownAs):"");
+            }).join(", "))) : null,
+          visitorsOf(m).length? el("div",{},
+            el("div",{class:"eyebrow"},"Visitors ("+visitorsOf(m).length+")"),
+            el("div",{},visitorsOf(m).map(visitorLine).join(", "))) : null,
+          el("div",{style:"font-size:11.5px;color:var(--muted)"},
+            "Neither is fined, and neither counts towards quorum.")) : null)),
     el("section",{class:"panel"},
       el("header",{},el("h2",{},"Minutes")),
       el("div",{class:"body",style:"white-space:pre-wrap;line-height:1.6"},m.body||"")),
@@ -15287,8 +15428,9 @@ function viewPerms(){
   }
   if(!S.perm){
     S.perm={loading:true};
-    Promise.all([srv.listPeople(), srv.listRoles()]).then(function(r){
-      S.perm={people:r[0], offices:r[1].offices, screens:r[1].screens};
+    Promise.all([srv.listPeople(), srv.listRoles(),
+                 srv.listRoll? srv.listRoll() : Promise.resolve([])]).then(function(r){
+      S.perm={people:r[0], offices:r[1].offices, screens:r[1].screens, roll:r[2]};
       renderAll();
     }).catch(function(e){
       S.perm={error:String((e&&e.message)||e)};
@@ -15303,68 +15445,156 @@ function viewPerms(){
   return [permNav()].concat(permTab()==="roles"? permRoles() : permPeople());
 }
 
-/* ------------------------------------------------------------- the people */
+/* ------------------------------------------------------------- the people
+   Every man on the roll, not only the ones who have already signed in. The
+   charter decides what a man is the day he is put on the roll; he should not
+   have to open the app first for that to be recordable.
+
+   His role is set right here on his line. A man with nothing set against him
+   is a Brother, which lets him put his own details, his medical and his
+   familia right and nothing else. That is what every man gets and the least
+   any man needs.
+
+   The fuller form - offices for the club as a whole, and seats in regions -
+   is behind More, and only means anything once he has a login. */
 function permPeople(){
-  const people=S.perm.people||[];
   const offs=officeList();
+  const roll=(S.perm.roll||[]).slice();
+  const people=S.perm.people||[];
+  const byMember={};
+  people.forEach(function(p){ if(p.memberId) byMember[p.memberId]=p; });
   const tree=orgTree()||{};
   const regions=(tree.regions||[]);
   const charters=[];
   regions.forEach(function(r){ (r.charters||[]).forEach(function(c){
     charters.push({id:c.id,name:c.name,region:r.name||"Region"}); }); });
-  (tree.charters||[]).forEach(function(c){ charters.push({id:c.id,name:c.name,region:""}); });
 
-  const body=el("div",{style:"display:flex;flex-direction:column;gap:10px"});
+  /* The roles a man holds at his charter. The club-wide ones and the region
+     seats are a different thing and live behind More. */
+  const chairRoles=offs.filter(function(o){
+    return o.scope==="charter"||o.scope==="self"; });
+
+  const body=el("div",{style:"display:flex;flex-direction:column;gap:14px"});
+  const noLogin=roll.filter(function(r){ return !r.hasLogin; }).length;
+  const noEmail=roll.filter(function(r){ return !(r.email||"").trim(); }).length;
+
   function draw(){
     body.textContent="";
-    if(!people.length) body.append(el("div",{style:"font-size:12.5px;color:var(--muted)"},
-      "Nobody has signed in yet. A man appears here the first time he signs in with the"
-      +" email address he is loaded under on the roll."));
-    people.forEach(function(p){
-      const open = S.permOpen===p.id;
-      const held=(p.clubOffices||[]).map(officeLabel).filter(Boolean);
-      const where=[];
-      (p.charters||[]).forEach(function(c){ if((c.offices||[]).length)
-        where.push(c.name+" ("+c.offices.map(officeLabel).join(", ")+")"); });
-      (p.regions||[]).forEach(function(r){ if((r.offices||[]).length)
-        where.push(r.name+" — region ("+r.offices.map(officeLabel).join(", ")+")"); });
-      const head=el("div",{class:"row",style:"align-items:center;gap:10px"},
-        el("div",{style:"flex:1 1 200px;min-width:0"},
-          el("b",{},p.name||p.email||"Not named"),
-          el("div",{style:"font-size:11.5px;color:var(--muted);word-break:break-all"},
-            (p.email||"no email")
-            + (p.charterName? (" · "+p.charterName) : " · no home charter")),
-          (held.length||where.length)
-            ? el("div",{style:"font-size:11.5px;margin-top:3px"},
-                held.length? el("span",{class:"cat"},held.join(" + ")) : null,
-                where.length? el("span",{style:"color:var(--muted)"}," "+where.join(" · ")) : null)
-            : el("div",{style:"font-size:11.5px;color:var(--bad);margin-top:3px"},
-                "No office anywhere — he can sign in and see nothing")),
-        p.mustChangePassword? el("span",{class:"cat"},"On a temporary password") : null,
-        p.active? null : el("span",{class:"cat"},"Off"),
-        el("button",{class:"btn"+(open?" primary":""),onclick:function(){
-          S.permOpen=open?null:p.id; renderAll(); }}, open? "Close" : "Change"));
-      const card=el("div",{style:"border:1px solid var(--line);border-radius:4px;padding:11px 12px;"
-        +"display:flex;flex-direction:column;gap:9px"},head);
-      if(open) card.append(permPersonForm(p,offs,charters,regions));
-      body.append(card);
+    if(!roll.length){
+      body.append(el("div",{style:"font-size:12.5px;color:var(--muted)"},
+        "Nobody on the roll yet. Add the men under Members and they appear here."));
+      return;
+    }
+    /* grouped by charter, because a club with several wants them apart */
+    const groups=[];
+    roll.forEach(function(r){
+      let g=groups.find(function(x){ return x[0]===r.charterId; });
+      if(!g){ g=[r.charterId, r.charterName||"Charter", []]; groups.push(g); }
+      g[2].push(r);
+    });
+    groups.forEach(function(g){
+      const rows=el("div",{style:"display:flex;flex-direction:column;gap:8px"});
+      g[2].forEach(function(r){ rows.append(permRollRow(r,chairRoles,byMember,charters,regions,offs,draw)); });
+      body.append(el("div",{},
+        groups.length>1? el("div",{class:"eyebrow",style:"margin-bottom:7px"},g[1]) : null,
+        rows));
     });
   }
   draw();
+
   return [
     el("div",{class:"note"},
-      el("b",{},"A man signs in with the email address he is loaded under."),
-      " Put him on the roll with his email first; he cannot register otherwise. Hand him a"
-      +" temporary password and the app makes him set his own the first time he opens it.",
+      el("b",{},"Every man on the roll is here, whether he has signed in or not."),
+      " Tap what he holds. A man with nothing ticked is a Brother — he may put his own"
+      +" details, his medical and his familia right, and nothing else.",
       el("div",{style:"margin-top:5px;color:var(--muted)"},
-        "An office here is a job, not a place. Where he does it is set underneath: a role at"
-        +" a charter, or a role in a region, or both, as many as he holds.")),
+        "He signs in with the email address he is loaded under on the roll, so put that on"
+        +" him under Members first. What you tick here is waiting for him the moment he"
+        +" first signs in."),
+      (noEmail||noLogin)? el("div",{style:"margin-top:5px"},
+        noEmail? el("span",{class:"cat"},noEmail+" with no email — cannot sign in") : null,
+        " ",
+        noLogin? el("span",{class:"cat"},noLogin+" with no login yet") : null) : null),
     el("section",{class:"panel"},
-      el("header",{},el("h2",{},"Who may sign in"),el("div",{class:"spacer"}),
+      el("header",{},el("h2",{},"The roll"),el("div",{class:"spacer"}),
         el("span",{style:"font-size:12px;color:var(--muted)"},
-          people.length+(people.length===1?" man":" men"))),
+          roll.length+(roll.length===1?" man":" men"))),
       el("div",{class:"body"},body))];
 }
+
+function permRollRow(r,chairRoles,byMember,charters,regions,offs,redraw){
+  const held=(r.offices||[]).slice();
+  const prof=byMember[r.memberId];
+  const err=el("div",{style:"font-size:12px;color:var(--bad)"});
+  const chips=el("div",{class:"row",style:"gap:4px;row-gap:5px;flex-wrap:wrap"});
+
+  function save(next){
+    const was=held.slice();
+    err.textContent="";
+    window.__MCF_SERVER__.saveMemberRole(r.charterId, r.memberId, next)
+      .then(function(list){
+        S.perm.roll=list;
+        /* the one he just changed, as the server now holds him */
+        const fresh=(list||[]).find(function(x){ return x.memberId===r.memberId
+          && x.charterId===r.charterId; });
+        toast((r.knownAs||"He")+" is now "
+          + ((fresh? fresh.offices : next)||[]).map(officeLabel).filter(Boolean).join(" + "));
+        renderAll();
+      })
+      .catch(function(e){
+        held.length=0; was.forEach(function(x){ held.push(x); });
+        err.textContent=String((e&&e.message)||e);
+        drawChips();
+      });
+  }
+  function drawChips(){
+    chips.textContent="";
+    chairRoles.forEach(function(o){
+      const on = held.indexOf(o.id)>=0 || (o.id==="brother" && !held.length);
+      chips.append(el("button",{class:"btn"+(on?" primary":""),
+        style:"padding:3px 9px;font-size:11.5px",
+        onclick:function(){
+          const at=held.indexOf(o.id);
+          const next = at>=0 ? held.filter(function(x){ return x!==o.id; })
+                             : held.concat([o.id]);
+          held.length=0; next.forEach(function(x){ held.push(x); });
+          drawChips();
+          save(next);
+        }},o.label));
+    });
+    /* anything he holds that is not a charter role - a national office, say -
+       is shown so it is never quietly lost by a tap up here */
+    const extra=held.filter(function(id){
+      return !chairRoles.some(function(o){ return o.id===id; }); });
+    if(extra.length) chips.append(el("span",{class:"cat",style:"align-self:center"},
+      extra.map(officeLabel).join(" + ")));
+  }
+  drawChips();
+
+  const open = S.permOpen===("m:"+r.memberId);
+  const card=el("div",{style:"border:1px solid var(--line);border-radius:4px;padding:10px 12px;"
+    +"display:flex;flex-direction:column;gap:8px"},
+    el("div",{class:"row",style:"align-items:center;gap:10px"},
+      el("div",{style:"flex:1 1 180px;min-width:0"},
+        el("b",{},r.knownAs||r.name||r.memberId),
+        el("div",{style:"font-size:11.5px;color:var(--muted);word-break:break-all"},
+          (r.name&&r.name!==r.knownAs? r.name+"  ·  " : "")
+          + (r.rank||"")
+          + ((r.email||"").trim()? ("  ·  "+r.email) : "  ·  no email"))),
+      r.active===false? el("span",{class:"cat"},"Off the roll") : null,
+      (r.email||"").trim()? null
+        : el("span",{class:"cat",style:"border-color:var(--bad);color:var(--bad)"},"No email"),
+      r.hasLogin
+        ? (r.mustChangePassword? el("span",{class:"cat"},"Temporary password")
+                               : el("span",{class:"cat"},"Signs in"))
+        : el("span",{class:"cat",style:"border-color:var(--warn);color:var(--warn)"},"No login yet"),
+      prof? el("button",{class:"btn"+(open?" primary":""),onclick:function(){
+        S.permOpen=open?null:("m:"+r.memberId); renderAll(); }}, open?"Close":"More") : null),
+    chips, err);
+  if(open && prof) card.append(permPersonForm(prof,offs,charters,regions));
+  return card;
+}
+
 function permPersonForm(p,offs,charters,regions){
   /* His own copy to work on, so nothing changes until Save is pressed. */
   const work={
@@ -17734,6 +17964,18 @@ function minutePage(m){
           el("td",{},r.state==="noshow"?"No show":"Apology"),
           el("td",{},r.reason||(r.state==="noshow"?"No word from him":"")),
           el("td",{style:"text-align:right;white-space:nowrap"},r.fine?money(r.fine.amount):"")))))) : null,
+    /* Everybody else who was at the table. Not fined, not counted towards
+       quorum, but the minutes should say they were there. */
+    famPresent(m).length? el("div",{},
+      el("h2",{},"The Familia present ("+famPresent(m).length+")"),
+      el("p",{style:"font-size:12px"},famPresent(m).map(function(fid){
+        const f=famById(fid); if(!f) return fid;
+        const r=member(f.memberId);
+        return f.name+(f.rel?(" ("+f.rel+")"):"")+(r?(" \u2014 "+r.knownAs):"");
+      }).join(", "))) : null,
+    visitorsOf(m).length? el("div",{},
+      el("h2",{},"Visitors ("+visitorsOf(m).length+")"),
+      el("p",{style:"font-size:12px"},visitorsOf(m).map(visitorLine).join(", "))) : null,
     (m.body||"").trim()? el("div",{},
       el("h2",{},"Minutes"),
       el("div",{style:"white-space:pre-wrap;font-size:12px;line-height:1.55"},m.body)):null,
