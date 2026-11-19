@@ -3084,6 +3084,9 @@ function emergencyCard(m,copy){
       fld("Medical aid",[d.aidScheme,d.aidNumber].filter(Boolean).join("  \u00b7  ")),
       fld("Doctor",[d.doctor,d.doctorPhone].filter(Boolean).join("  \u00b7  ")),
       fld("Address",addrLines(m.address).join("\n")),
+      /* He is at his work most of the day, so it is the number that answers
+         when his own does not. */
+      fld("Work",[m.employer,m.workPhone].filter(Boolean).join("\n")),
       /* The registration is what a traffic officer, a tow truck or a
          casualty desk asks for before anything else. */
       ((m.bikes||[]).length? fld((m.bikes.length>1?"Bikes":"Bike"),
@@ -10464,6 +10467,8 @@ function viewMember(){
             "Blood "+med(m).blood):null),
         (m.phone||m.email)? el("div",{style:"font-size:12.5px;color:var(--muted);margin-top:7px"},
           [m.phone,m.email].filter(Boolean).join("  \u00b7  ")) : null,
+        m.employer? el("div",{style:"font-size:12.5px;color:var(--muted);margin-top:2px"},
+          m.employer+(m.workPhone?("  \u00b7  "+m.workPhone):"")) : null,
         addrLines(m.address).length? el("div",{style:"font-size:12.5px;color:var(--muted);margin-top:5px;white-space:pre-line"},
           addrLines(m.address).join("\n")) : null,
         /* Where he came from: his previous club, or the charter he transferred
@@ -16609,7 +16614,8 @@ function memberModal(id){
   /* A brother opening his own record edits his own details and nothing else. */
   const mineOnly = ownDetailsOnly(id);
   const m=id?member(id):{id:"",firstName:"",surname:"",knownAs:"",status:"Prospect",email:"",phone:"",
-    idNumber:"",address:"",photoId:"",active:true,opening:0,noCharge:false,chargeFrom:today().slice(0,7)};
+    idNumber:"",address:"",employer:"",workPhone:"",photoId:"",active:true,opening:0,noCharge:false,
+    chargeFrom:today().slice(0,7)};
   const f={};
   const t=(k,ph)=>f[k]=el("input",{type:"text",id:"m-"+k,value:m[k]||"",placeholder:ph||""});
   const photo=(function(){
@@ -16735,6 +16741,12 @@ function memberModal(id){
       mineOnly? null : el("label",{class:"f"},el("span",{},"Opening balance"),f.opening)),
     el("label",{class:"f"},el("span",{},"Address"),f.address=el("textarea",{id:"m-address",rows:"4",
       placeholder:"10 Erica Street\nGrimbeeck Park\nPotchefstroom\n2531"},addrLines(m.address).join("\n"))),
+    /* Where he works. A man is at his work most of the day, so it is the
+       number that answers when his own does not, and it goes on his
+       emergency card for the same reason. */
+    el("div",{class:"grid2"},
+      el("label",{class:"f"},el("span",{},"Where he works"),t("employer","Ernst Scrap Metal")),
+      el("label",{class:"f"},el("span",{},"Work phone"),t("workPhone","018 293 0422"))),
     mineOnly? null : el("label",{class:"row",style:"align-items:center;gap:7px;font-weight:600"},f.active,"On the active roll"),
     mineOnly? null : el("div",{class:"note"},
       el("div",{class:"eyebrow",style:"margin-bottom:7px"},"Monthly charges"),
@@ -16776,11 +16788,13 @@ function memberModal(id){
             surname:f.surname.value.trim(), phone:f.phone.value.trim(),
             email:f.email.value.trim(), idNumber:f.idNumber.value.trim(),
             address:addrLines(f.address.value).join("\n"), photoId:photo.id(),
+            employer:f.employer.value.trim(), workPhone:f.workPhone.value.trim(),
             bikes:cleanBikes(bikes) }
         : { id: id || slug(known), knownAs:known, firstName:f.firstName.value.trim(),
             surname:f.surname.value.trim(), status:f.status.value, phone:f.phone.value.trim(),
             email:f.email.value.trim(), idNumber:f.idNumber.value.trim(),
             address:addrLines(f.address.value).join("\n"), photoId:photo.id(),
+            employer:f.employer.value.trim(), workPhone:f.workPhone.value.trim(),
             bikes:cleanBikes(bikes),
             active:f.active.checked, opening:Math.round((parseFloat(f.opening.value)||0)*100)/100,
             noCharge:f.noCharge.checked, chargeFrom:f.chargeFrom.value||"",
@@ -16794,6 +16808,7 @@ function memberModal(id){
          that are his. An officer editing the roll writes it whole as before. */
       const done = mineOnly
         ? saveOwn({knownAs:rec.knownAs, firstName:rec.firstName, surname:rec.surname,
+            employer:rec.employer, workPhone:rec.workPhone,
                    phone:rec.phone, email:rec.email, idNumber:rec.idNumber,
                    address:rec.address, photoId:rec.photoId, bikes:rec.bikes})
         : saveMembers();
@@ -17277,7 +17292,9 @@ function statementPage(m){
         m.phone?el("dt",{},"Contact"):null, m.phone?el("dd",{},m.phone):null,
         m.email?el("dt",{},"Email"):null, m.email?el("dd",{},m.email):null,
         addrLines(m.address).length?el("dt",{},"Address"):null,
-        addrLines(m.address).length?el("dd",{style:"white-space:pre-line"},addrLines(m.address).join("\n")):null),
+        addrLines(m.address).length?el("dd",{style:"white-space:pre-line"},addrLines(m.address).join("\n")):null,
+        m.employer?el("dt",{},"Works at"):null,
+        m.employer?el("dd",{},m.employer+(m.workPhone?("  \u00b7  "+m.workPhone):"")):null),
       el("div",{class:"stamp"},
         el("div",{class:"lbl"},bal<0?"Owing to the club":"In credit"),
         el("div",{class:"amt"},money(Math.abs(bal))))),
