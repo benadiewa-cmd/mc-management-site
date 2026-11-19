@@ -3168,6 +3168,179 @@ function printEmergencyList(){
 }
 
 
+/* ---------------------- the roll, printed ----------------------
+   What a charter actually needs on a printed roll: who he is, what he rides,
+   how to reach him, and how long he has been patched. Grouped by standing,
+   because that is how a club reads its own roll - the exec first, then the
+   patched members, then the men still earning it.
+
+   His ID number and his address are on this sheet. That is deliberate - it is
+   the roll, and an officer needs it - but it means the sheet is confidential
+   and the footer says so. Nothing medical is on it; that lives on the
+   emergency list, which is a different sheet for a different purpose. */
+function rollGroups(list){
+  const exec=[], full=[], pros_=[], hang=[], other=[];
+  list.forEach(function(m){
+    const s=String(m.status||"");
+    if(isExec(s)) exec.push(m);
+    else if(/^full member$|^member$/i.test(s)) full.push(m);
+    else if(/prospect/i.test(s)) pros_.push(m);
+    else if(/hangaround/i.test(s)) hang.push(m);
+    else other.push(m);
+  });
+  return [["The exec",exec],["Full members",full],["Prospects",pros_],
+          ["Hangarounds",hang],["Everybody else",other]]
+    .filter(function(g){ return g[1].length; });
+}
+function printMemberList(opts){
+  opts=opts||{};
+  const all=(S.members||[]).slice();
+  const list=opts.withInactive? all : all.filter(function(m){ return m.active!==false; });
+  if(!list.length){ toast("Nobody on the roll.",true); return; }
+  const groups=rollGroups(list.sort(byName));
+  const cols=["Road name","Name","ID number","Rank","Patched","Phone","Email","Bike","Reg"];
+  const page=[docHead("Membership roll",
+      (opts.withInactive? "Every man ever on the roll" : "Active members")
+      +" · "+fdate(today()))];
+  groups.forEach(function(g){
+    page.push(el("h2",{style:"margin:14px 0 5px"},g[0]+" ("+g[1].length+")"));
+    page.push(el("table",{},
+      el("thead",{},el("tr",{},cols.map(function(c){ return el("th",{},c); }))),
+      el("tbody",{},g[1].map(function(m){
+        const b=(m.bikes&&m.bikes[0])||{};
+        const on=patchedOn(m);
+        return el("tr",{style:(m.active===false)?"opacity:.6":null},
+          el("td",{},el("b",{},m.knownAs||"—"),
+            (m.active===false)? el("div",{style:"font-size:10px;color:#666 !important"},"inactive") : null),
+          el("td",{},((m.firstName||"")+" "+(m.surname||"")).trim()||"—"),
+          el("td",{style:"white-space:nowrap"},m.idNumber||"—"),
+          el("td",{},m.status||"Member"),
+          /* A prospect carries the date he is due to be patched, not a date he
+             has been. Printing it bare next to the word Prospect reads as if
+             he is already in, which is the one thing this column must not do. */
+          el("td",{style:"white-space:nowrap"},(function(){
+            if(!on) return isProspectRank(m.status)? "prospecting" : "—";
+            return (on>today())? ("due "+fdate(on)) : fdate(on);
+          })()),
+          el("td",{style:"white-space:nowrap"},m.phone||"—"),
+          el("td",{style:"word-break:break-all"},m.email||"—"),
+          el("td",{},[b.year,b.make,b.model].filter(Boolean).join(" ")||"—"),
+          el("td",{style:"white-space:nowrap"},b.reg||"—"));
+      }))));
+    /* a man with more than one bike gets his others named underneath, so the
+       sheet never quietly drops one */
+    const extra=g[1].filter(function(m){ return (m.bikes||[]).length>1; });
+    if(extra.length) page.push(el("p",{style:"font-size:10.5px;color:#666 !important;margin:4px 0 0"},
+      "Also rides — "+extra.map(function(m){
+        return m.knownAs+": "+(m.bikes||[]).slice(1).map(bikeLine).join("; ");
+      }).join(" · ")+"."));
+  });
+  const noEmail=list.filter(function(m){ return !String(m.email||"").trim(); });
+  const noMed=list.filter(function(m){ return m.active!==false && !hasMedical(m); });
+  page.push(el("p",{style:"font-size:11px;color:#666 !important;margin-top:12px"},
+    list.length+(list.length===1?" man":" men")+" on this sheet."
+    +(noEmail.length? ("  Without an email, so they cannot sign in: "
+        +noEmail.map(function(m){return m.knownAs;}).join(", ")+".") : "")
+    +(noMed.length? ("  No medical on file: "
+        +noMed.map(function(m){return m.knownAs;}).join(", ")+".") : "")));
+  page.push(docFoot({plain:true,note:"Confidential — identity numbers and contact details. "
+    +"Keep it with the secretary and destroy old copies."}));
+  doPrint(el("div",{class:"docpage"},page),
+    slug(S.club.name)+"-roll-"+today()+".html",
+    S.club.name+" — membership roll");
+}
+
+/* ------------------ the applications, printed ------------------
+   One sheet for the table. A man's own form prints separately and in full -
+   that is the document he signed. This is the list the exec works through at
+   a meeting: who is in front of us, how far each one has got, who sponsored
+   him, and what still has to be answered before he goes forward.
+
+   It carries the stops rather than just counting them, because "two things
+   need answering" is no use to anybody reading it in a hall. */
+function printApplicationList(opts){
+  opts=opts||{};
+  const all=(S.applications||[]).slice()
+    .sort(function(x,y){ return String(y.at||"").localeCompare(String(x.at||"")); });
+  const open=all.filter(function(a){
+    return ["draft","sponsor","president"].indexOf(a.status||"draft")>=0; });
+  const list=opts.all? all : open;
+  if(!list.length){ toast(opts.all? "No applications." : "Nothing waiting.",true); return; }
+
+  const page=[docHead("Applications",
+    (opts.all? "Every application" : "Still in front of the exec")+" \u00b7 "+fdate(today()))];
+  page.push(el("table",{},
+    el("thead",{},el("tr",{},
+      el("th",{},"Name"),el("th",{},"Road name"),el("th",{},"Charter"),
+      el("th",{},"Sponsor"),el("th",{},"Previous MC"),el("th",{},"Where it stands"),
+      el("th",{},"Signed"))),
+    el("tbody",{},list.map(function(a){
+      const st=APP_STATUS[a.status||"draft"]||["?","",""];
+      const sig=[a.sponsorSignedBy? "sponsor" : "", a.presidentSignedBy? "president" : ""]
+        .filter(Boolean).join(" + ");
+      return el("tr",{},
+        el("td",{},el("b",{},a.fullName||"Unnamed")),
+        el("td",{},a.nickName||"\u2014"),
+        el("td",{},a.requestingCharter||"\u2014"),
+        el("td",{},a.sponsorName||el("span",{style:"color:#a00 !important"},"none named")),
+        el("td",{},a.prevMC||"\u2014"),
+        el("td",{style:"white-space:nowrap"},st[0]),
+        el("td",{style:"white-space:nowrap"},sig||"\u2014"));
+    }))));
+
+  /* what has to be answered, per man, spelled out */
+  const trouble=list.map(function(a){
+    return {a:a, stops:vetFlags(a).filter(function(f){ return f.bad; })};
+  }).filter(function(x){ return x.stops.length; });
+  if(trouble.length){
+    page.push(el("h2",{style:"margin:14px 0 5px"},"Before any of these go forward"));
+    trouble.forEach(function(x){
+      page.push(el("p",{style:"font-size:12px;margin:0 0 5px"},
+        el("b",{},x.a.fullName||"Unnamed"),": ",
+        x.stops.map(function(f){ return f.t; }).join("; ")+"."));
+    });
+  }
+  const ready=list.filter(function(a){ return (a.status||"")==="president"; });
+  if(ready.length) page.push(el("p",{style:"font-size:12px;margin-top:10px"},
+    el("b",{},"Signed off and can be taken on: "),
+    ready.map(function(a){ return a.fullName||"Unnamed"; }).join(", ")+"."));
+
+  page.push(el("p",{style:"font-size:11px;color:#666 !important;margin-top:12px"},
+    list.length+(list.length===1?" application":" applications")+" on this sheet"
+    +(opts.all? "." : "; "+(all.length-open.length)+" already settled and left off.")));
+  page.push(docFoot({plain:true,note:"Confidential \u2014 for the exec only. "
+    +"A man's own form prints in full from his card."}));
+  doPrint(el("div",{class:"docpage"},page),
+    slug(S.club.name)+"-applications-"+today()+".html",
+    S.club.name+" \u2014 applications");
+}
+
+/* A blank one to hand across the table. */
+function printBlankApplication(){
+  const page=[docHead("Prospective Member Information","Blank form · "+fdate(today()))];
+  let rows=null;
+  APP_FIELDS.forEach(function(spec){
+    if(spec.sec){
+      page.push(el("h2",{style:"margin:13px 0 4px"},spec.sec));
+      rows=el("table",{class:"kv"},el("tbody",{}));
+      page.push(rows);
+      return;
+    }
+    rows.querySelector("tbody").append(el("tr",{},
+      el("td",{style:"width:52%;color:#444 !important"},spec.l+(spec.req?" *":"")),
+      el("td",{},spec.yn
+        ? el("span",{style:"font-size:12px"},"Yes  ☐ No  ☐")
+        : el("span",{style:"display:inline-block;min-width:60mm;border-bottom:1px solid #b9b3a8"}," "))));
+  });
+  page.push(el("p",{style:"font-size:11px;color:#666 !important;margin-top:10px"},
+    "* must be answered."));
+  page.push(docFoot({plain:true,note:"Hand this to the man, or fill it in with him. "
+    +"Once it is captured in the app the signatures can be recorded against it."}));
+  doPrint(el("div",{class:"docpage"},page),
+    slug(S.club.name)+"-application-blank.html",
+    S.club.name+" — blank application form");
+}
+
 /* ============================ family ============================ */
 const FAM_REL=["Wife","Husband","Partner","Son","Daughter","Mother","Father",
                "Brother","Sister","Grandchild","Other"];
@@ -10532,6 +10705,9 @@ function viewMembers(){
         el("span",{style:"font-size:12px;color:var(--muted)"},
           activeMembers().length+" active \u00b7 "+(S.members.length-activeMembers().length)+" inactive"),
         el("div",{class:"spacer"}),
+        S.members.length? el("button",{class:"btn",onclick:()=>printMemberList()},"Print the roll"):null,
+        (S.members.length>activeMembers().length)
+          ? el("button",{class:"btn ghost",onclick:()=>printMemberList({withInactive:true})},"\u2026with inactive"):null,
         rollEdit()? el("button",{class:"btn primary",onclick:()=>memberModal(null)},"Add member"):null),
       el("div",{class:"tscroll"},el("table",{},
         el("thead",{},el("tr",{},el("th",{},"Road name"),el("th",{},"Name"),el("th",{},"Rank"),
@@ -13293,6 +13469,11 @@ function viewApplications(){
       codeRef("sec.6")),
     el("section",{class:"panel"},el("header",{},el("h2",{},"Applications"),
       el("div",{class:"spacer"}),chips,
+      /* the sheet for the table; a man's own form prints off his own card */
+      (S.applications||[]).length
+        ? el("button",{class:"btn",onclick:()=>printApplicationList(
+            {all:state.f==="all"||state.f==="done"})},"Print the list"):null,
+      el("button",{class:"btn ghost",onclick:printBlankApplication},"Blank form"),
       el("button",{class:"btn primary",onclick:()=>applicationModal(null)},"Start an application"))),
     body);
   return [wrap];
