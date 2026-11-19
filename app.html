@@ -656,7 +656,11 @@ function start(){
       mustChangePassword: !!ME.mustChangePassword,
       scope: ME.scope, role: "office"
     };
-    return loadShape();
+    /* The club's own roles, so the app knows what a man holds even when the
+       club wrote the role itself. Without this a custom role is a name the
+       app has never heard of, and the man holding it appears to hold
+       nothing. A club with no reach to this list is no reason not to open. */
+    return Promise.all([loadShape(), loadOffices()]);
   }).then(function(){
     /* No charter of his own: stand on the first one he is allowed to see, so
        the screens have something to show. On a club with no charters yet there
@@ -673,6 +677,15 @@ function start(){
     if(window.__MCF_REPAINT__) window.__MCF_REPAINT__();
     return true;
   });
+}
+
+/* The offices the club holds, screens and all, read once at sign-in. */
+function loadOffices(){
+  return Promise.all([sb.rpc("all_offices"), sb.rpc("all_screens")]).then(function(rs){
+    if(!rs[0].error) window.__MCF_OFFICES__ = rs[0].data || [];
+    if(!rs[1].error) window.__MCF_SCREENS__ = rs[1].data || [];
+    return true;
+  }).catch(function(){ return true; });
 }
 
 /* ---------------------------------------------------------------- the API */
@@ -713,6 +726,52 @@ window.__MCF_SERVER__ = {
       return r.data;
     });
   },
+  /* ------------------------------------------------------- permissions
+     Everything the Permissions screen needs. Each one is a single ask of the
+     database, which decides for itself whether this man may; none of these
+     carry a right of their own. The two "save" calls hand back the whole
+     fresh list, so the screen never has to guess what it just did. */
+  listPeople: function(){
+    return sb.rpc("all_people").then(function(r){
+      if(r.error) throw refused(r.error);
+      return r.data || [];
+    });
+  },
+  saveAssignments: function(target, body){
+    return sb.rpc("save_assignments",{target:target, body:body}).then(function(r){
+      if(r.error) throw refused(r.error);
+      return r.data || [];
+    });
+  },
+  listRoles: function(){
+    return Promise.all([sb.rpc("all_offices"), sb.rpc("all_screens")]).then(function(rs){
+      if(rs[0].error) throw refused(rs[0].error);
+      if(rs[1].error) throw refused(rs[1].error);
+      var offs = rs[0].data || [];
+      window.__MCF_OFFICES__ = offs;
+      window.__MCF_SCREENS__ = rs[1].data || [];
+      return {offices:offs, screens:window.__MCF_SCREENS__};
+    });
+  },
+  saveRole: function(body){
+    return sb.rpc("save_office",{body:body}).then(function(r){
+      if(r.error) throw refused(r.error);
+      if(r.data) window.__MCF_OFFICES__ = r.data;
+      return r.data || [];
+    });
+  },
+  deleteRole: function(id){
+    return sb.rpc("delete_office",{rid:id}).then(function(r){
+      if(r.error) throw refused(r.error);
+      return sb.rpc("all_offices");
+    }).then(function(r){
+      if(r.error) throw refused(r.error);
+      window.__MCF_OFFICES__ = r.data || [];
+      return window.__MCF_OFFICES__;
+    });
+  },
+  offices: function(){ return window.__MCF_OFFICES__ || null; },
+  screens: function(){ return window.__MCF_SCREENS__ || null; },
   returns: function(){ return window.__MCF_RETURNS__ || []; },
   refresh: function(){
     return loadRollup().then(function(rows){
@@ -1351,7 +1410,7 @@ function officePicker(held,onChange){
       : el("div",{class:"note bad",style:"font-size:12.5px"},
           el("b",{},"No office chosen.")," He will not be able to open the books."));
   }
-  OFFICE_GROUPS.forEach(function(grp){
+  officeGroups().forEach(function(grp){
     wrap.append(el("div",{},
       el("div",{class:"eyebrow",style:"margin-bottom:5px"},grp[0]),
       el("div",{class:"row",style:"gap:12px;row-gap:6px;flex-wrap:wrap"},
@@ -1462,7 +1521,14 @@ function setView(){ const g=S.grants||{}; return g.set==="charter"||g.set==="all
 function setAll(){ const g=S.grants||{}; return g.set==="all"; }
 /* The roll itself. The treasurer keeps the money straight, the secretary
    keeps the charter straight, and between them the roll is maintained. */
-function rollEdit(){ return finEdit()||setView(); }
+function rollEdit(){
+  /* On the club's own server the roles say outright whether he may change the
+     roll, and a club may have written a role that keeps the roll and touches
+     neither the money nor the settings. Off the server, as before. */
+  const sl=screenLevel("members");
+  if(sl!==null) return sl==="edit";
+  return finEdit()||setView();
+}
 function myMemberId(){
   const sv=window.__SERVER_USER__;
   if(sv && sv.memberId) return sv.memberId;
@@ -2014,7 +2080,84 @@ const FIN_RANK={none:0,own:1,view:2,edit:3};
 const MIN_RANK={none:0,view:1,edit:2};
 const SET_RANK={none:0,charter:1,all:2};
 const SCOPE_WORD={self:"Himself",charter:"The charter",region:"The region",national:"The whole club"};
-function office(id){ for(var i=0;i<OFFICES.length;i++) if(OFFICES[i].id===id) return OFFICES[i]; return null; }
+/* The club's own roles.
+   The sixteen below are what a club starts with. A club that writes its own -
+   a Road Captain, a Sergeant at Arms - keeps them on the server, and the app
+   has to know about them or the man holding one appears to hold nothing at
+   all: officesOf() throws away every id it does not recognise, and he lands
+   on Documents wondering what he broke.
+
+   A server role carries a level for every screen in the app. That list is the
+   real answer and screenLevel() reads it. The four old switches are kept
+   because half the app still asks for them, and for a club-written role they
+   are worked back out of the screens. */
+const MONEY_SCREENS=["bank","reconcile","reports","badstanding"];
+const MIN_SCREENS=["minutes","actions","votes","decisions"];
+function serverOffices(){
+  const srv=window.__MCF_SERVER__;
+  const list=(srv&&srv.offices&&srv.offices()) || window.__MCF_OFFICES__ || null;
+  return (Array.isArray(list)&&list.length)? list : null;
+}
+function bestOf(rts,ids,rank){
+  let v="none";
+  (ids||[]).forEach(function(id){ const l=rts[id]; if(l&&rank[l]>rank[v]) v=l; });
+  return v;
+}
+function mapServerOffice(so){
+  const rts=(so.rights&&typeof so.rights==="object")? so.rights : null;
+  const out={id:so.id, label:so.label||so.id, scope:so.scope||"charter",
+             fin:so.fin||"none", min:so.minutes||"none", set:so.settings||"none",
+             rights:rts, builtin:!!so.builtin, note:so.note||"",
+             sort:(so.sort==null?100:so.sort)};
+  if(rts){
+    const f=bestOf(rts,MONEY_SCREENS,FIN_RANK); if(FIN_RANK[f]>FIN_RANK[out.fin]) out.fin=f;
+    const m=bestOf(rts,MIN_SCREENS,MIN_RANK);   if(MIN_RANK[m]>MIN_RANK[out.min]) out.min=m;
+    const st=(rts.global==="edit")? "all" : (rts.settings==="edit")? "charter" : "none";
+    if(SET_RANK[st]>SET_RANK[out.set]) out.set=st;
+  }
+  return out;
+}
+function office(id){
+  const list=serverOffices();
+  if(list){ for(var j=0;j<list.length;j++) if(list[j].id===id) return mapServerOffice(list[j]); }
+  for(var i=0;i<OFFICES.length;i++) if(OFFICES[i].id===id) return OFFICES[i];
+  return null;
+}
+function officeList(){
+  const list=serverOffices();
+  return list? list.map(mapServerOffice) : OFFICES.slice();
+}
+/* The ticks on the Permissions screen, grouped the way the club is grouped.
+   Built from whatever roles the club actually has, not a fixed list. */
+function officeGroups(){
+  const list=serverOffices();
+  if(!list) return OFFICE_GROUPS;
+  const o=officeList();
+  const buckets=[["The club",[]],["National",[]],["Regional",[]],["The charter",[]]];
+  o.forEach(function(x){
+    if(x.set==="all") buckets[0][1].push(x.id);
+    else if(x.scope==="national") buckets[1][1].push(x.id);
+    else if(x.scope==="region")   buckets[2][1].push(x.id);
+    else buckets[3][1].push(x.id);
+  });
+  return buckets.filter(function(b){ return b[1].length; });
+}
+/* What this man may do with one named screen, when the server has told us.
+   The widest of every office he holds wins. Null means nobody has said, and
+   the caller falls back to the switches as before. */
+function screenLevel(id){
+  const list=serverOffices(); if(!list) return null;
+  const held=myOffices(); if(!held.length) return null;
+  const RANK={none:0,view:1,edit:2};
+  let seen=false, best="none";
+  held.forEach(function(oid){
+    const o=office(oid); if(!o||!o.rights) return;
+    seen=true;
+    const l=o.rights[id];
+    if(l && RANK[l]>RANK[best]) best=l;
+  });
+  return seen? best : null;
+}
 function officeLabel(id){ const o=office(id); return o? o.label : String(id||""); }
 function officesOf(r){
   const ids=(r&&Array.isArray(r.offices))? r.offices : [];
@@ -2068,7 +2211,8 @@ const S={
   isOwner:false, myCode:"", returns:[], org:null,
   minutes:[], docs:[], upcoming:[], imports:[], family:[], applications:[], votes:[],
   club:null, members:[], events:[], arrangements:[], ledgers:{},   // key -> {owner, year, entries[]}
-  view:"dash", sel:null, filters:{}, report:null, dashEvent:null, pick:{}, writeFailed:false
+  view:"dash", sel:null, filters:{}, report:null, dashEvent:null, pick:{}, writeFailed:false,
+  perm:null, permTab:"people", permOpen:null, permRole:null, permCopy:null
 };
 const DEFAULT_CLUB={
   name:"Your Charter", subtitle:"Club books", legalName:"",
@@ -3542,7 +3686,7 @@ function showNoAccess(){
         try{ code.select(); document.execCommand("copy"); toast("Code copied \u2014 send it to the treasurer."); }
         catch(e){ toast("Select the code and copy it.",true); }
       }},"Copy the code")):null,
-    el("div",{class:"foot"},"He adds you under Settings \u203a Who can open the books, then you refresh this page.")));
+    el("div",{class:"foot"},"He adds you under Permissions, then you refresh this page.")));
 }
 function gateOrRender(){
   applyIdentity();
@@ -6744,7 +6888,7 @@ const GUIDE=[
    "On the first of the month press Monthly run on the Club account. That charges everyone in one press.",
    "After that it is the running of the club: post money as it happens, keep the minutes, take the votes, mark who turned up, and print what the meeting needs."],
   notes:[
-   "There is no signing in on the phone. Everything is on this phone and nothing is shared, so there is nobody to sign in as \u2014 until you add the men who may open it, under Settings.",
+   "There is no signing in on the phone. Everything is on this phone and nothing is shared, so there is nobody to sign in as \u2014 until you add the men who may open it, under Permissions.",
    "Everything saves itself as you go. There is no save button for the app as a whole, only inside a form you are filling in.",
    "Back up often: Settings \u203a Backup writes the whole lot to a file you keep. Nobody else holds a copy.",
    "Watch the walkthrough at the top of this page if you would rather be shown than read."]},
@@ -7145,19 +7289,23 @@ const GUIDE=[
    "This is so it can be said early, while it is still a phone call.",
    "A meeting with nobody marked is left out of the count, so a forgotten roll does not make everybody look absent."]},
 
- {id:"offices", title:"Who sees what", lead:"Offices, not switches.", who:"set",
+ {id:"offices", title:"Who sees what", lead:"One screen: Permissions.", who:"set",
   steps:[
-   "Settings \u203a Sign in. Add a line for each brother who uses this phone, pick him off the roll, and give him a PIN if you want one.",
-   "Under his name, tick the office he actually holds. Charter Treasurer, Charter Secretary, Charter President, Regional President, National Vice President, or plain Brother.",
-   "A man may hold more than one \u2014 in a small charter the Secretary is often the Vice President too. Tick both and he gets the best of each.",
-   "The line under the ticks says in plain words what he will be able to see and do. Read it before you save.",
-   "Somebody has to hold Overall Admin, or nobody can ever reach these settings again. The app will not let you save a list without one."],
+   "Permissions, on the menu. It is the only place access is decided \u2014 it used to be split between two panels in Settings that disagreed with each other.",
+   "People. Every man who can sign in, the email address he signs in with, and what he holds. Change opens him up.",
+   "An office is a job; where he does it is set underneath. Tick what he holds for the club as a whole, then add the charters he answers for and tick his office at each, then the regions. A man can be Treasurer at two charters and sit in a region as well.",
+   "His home charter is the one his own statement comes from. He may sign in turns him off without taking him off the roll.",
+   "Roles. What an office may actually do, screen by screen: Hidden, May look, May change. The sixteen the club starts with are there; Copy one, give it a name of its own, and you have written your own \u2014 a Road Captain who runs the diary and the roll and never sees the money.",
+   "All hidden, All may look and All may change on a group heading set the whole group in one press, then change the odd one back.",
+   "Somebody has to hold Overall Admin, or nobody can ever reach this screen again. The app will not let you take it off yourself, and the server refuses it too."],
   notes:[
+   "A man signs in with the email address he is loaded under on the roll. Load him with his email first \u2014 he cannot register otherwise. Hand him a temporary password and the app makes him set his own the first time he opens it.",
    "Treasurer may post and change entries. Secretary keeps the charter settings and writes the minutes, and between them the two of them keep the roll.",
    "President and Vice President see everything for their charter but change no money.",
    "A plain Brother sees the roll, the diary, the documents and the minutes, and of the money only his own statement and the club summary. Another man's balance is not his business.",
    "Regional President and Vice President see every charter in their region. National sees the whole club.",
-   "A brother cannot promote himself, cannot wipe his own debt, cannot backdate his own patch and cannot read another brother\u2019s statement.",
+   "A brother cannot promote himself, cannot wipe his own debt, cannot backdate his own patch and cannot read another brother\u2019s statement. What he may put right about himself is his own details, his medical and his familia \u2014 not his rank, not his charter and not his dates.",
+   "A role you wrote yourself is held to the same line as the sixteen: the database works the document rights out of the screens, so a screen a man cannot open is a document he cannot read, whichever way he comes at it.",
    "On the club\u2019s own server those are shut at the door and not merely hidden from the screen: the database refuses them, whatever the screen is asked to show. Ninety-nine rules like these are proved on every build before it is handed over.",
    "On a phone it is a latch, not a safe. Anybody holding this phone with some know-how can read past it. It decides what the app puts on screen, and on a phone with no sign-in server that is all it can do."]},
 
@@ -7583,6 +7731,7 @@ const VIEWS=[
   {id:"transfers",label:"Transfers",   title:"Moving between charters", area:"admin", server:true},
   {id:"global",  label:"Global",       title:"Global settings",    area:"global", server:true},
   {id:"rollup",  label:"Club reports", title:"Regional and national", area:"nat"},
+  {id:"perms",   label:"Permissions", title:"Permissions",        area:"perms"},
   {id:"settings",label:"Settings",     title:"Settings",           area:"set"},
   {id:"guide",   label:"How to use",   title:"How to use MC Management", area:"all"},
   {id:"about",   label:"About",        title:"About these books",    area:"all"}
@@ -7593,6 +7742,19 @@ function viewAllowed(v){
      nothing for them to talk to, so they are not offered at all rather than
      offered and then refused. */
   if(v.server && !ccb()) return false;
+  /* Permissions is the Overall Admin's screen and nobody else's. The database
+     refuses every call behind it to anybody else, so offering it would only
+     waste his time. */
+  if(v.area==="perms") return setAll();
+  /* On the club's own server the roles decide, screen by screen, and a club
+     that has written its own roles has already said what each one sees. The
+     areas below are what a copy running on its own has to go on. */
+  /* Two are left to their own rules on purpose. My statement is offered only
+     to the brother for whom it is the whole of the money - a treasurer reads
+     his own off the roll like anybody else's. Global settings answer to the
+     Global Admin and not to a club role. */
+  const sl=screenLevel(v.id);
+  if(sl!==null && v.area!=="all" && v.id!=="mine" && v.id!=="global") return sl!=="none";
   if(v.area==="all") return true;
   if(v.area==="global") return isGlobalAdmin();
   /* Who he is decides the rest. An office bearer with the region or the
@@ -15077,6 +15239,617 @@ function viewGlobal(){
   ];
 }
 
+/* ======================= Permissions =======================
+   One screen, and the only screen, where it is decided who may open what.
+   It used to be two halves sitting in Settings - a sign-in list on the phone
+   and a roles list that the server never read - which disagreed with each
+   other and misled whoever opened them.
+
+   On the club's own server there are two things to set and they are different
+   things:
+
+     People  - which charters and which regions a man answers for, and which
+               offices he holds at each. A man can hold the Treasurer role at
+               two charters and sit in a region as well.
+     Roles   - what an office may do, screen by screen: hidden, may look, may
+               change. The club writes its own; the sixteen it starts with can
+               be copied and changed like any other.
+
+   Neither of these is security. Every call behind this screen is refused by
+   the database to anybody but the Overall Admin, and refused again for any
+   charter that is not his club's. This only asks.
+   ====================================================================== */
+const LEVEL_WORD={none:"Hidden",view:"May look",edit:"May change"};
+function permTab(){ return S.permTab||"people"; }
+function permNav(){
+  const tabs=[["people","People"],["roles","Roles"]];
+  return el("div",{class:"row",style:"gap:8px;margin-bottom:4px"},
+    tabs.map(function(t){
+      return el("button",{class:"btn"+(permTab()===t[0]?" primary":""),
+        onclick:function(){ S.permTab=t[0]; renderAll(); }},t[1]);
+    }));
+}
+function viewPerms(){
+  const srv=window.__MCF_SERVER__;
+  /* A copy running on its own has no server to ask. Its two lists are the
+     ones that used to sit in Settings, moved here whole so nothing is lost. */
+  if(!(srv && srv.listPeople)){
+    return [el("div",{class:"note"},
+        el("b",{},"This copy keeps its own list."),
+        " There is no club server behind it, so who may open these books is decided here"
+        +" and goes no further than this device."),
+      panelLocalSignIn(), panelWhoCanOpen()];
+  }
+  if(!S.perm){
+    S.perm={loading:true};
+    Promise.all([srv.listPeople(), srv.listRoles()]).then(function(r){
+      S.perm={people:r[0], offices:r[1].offices, screens:r[1].screens};
+      renderAll();
+    }).catch(function(e){
+      S.perm={error:String((e&&e.message)||e)};
+      renderAll();
+    });
+  }
+  if(S.perm.loading) return [permNav(), el("div",{class:"note"},"Reading the club's roles…")];
+  if(S.perm.error) return [permNav(),
+    el("div",{class:"note bad"},el("b",{},"The server would not say."), " "+S.perm.error,
+      el("div",{class:"row",style:"margin-top:10px"},
+        el("button",{class:"btn",onclick:function(){ S.perm=null; renderAll(); }},"Try again")))];
+  return [permNav()].concat(permTab()==="roles"? permRoles() : permPeople());
+}
+
+/* ------------------------------------------------------------- the people */
+function permPeople(){
+  const people=S.perm.people||[];
+  const offs=officeList();
+  const tree=orgTree()||{};
+  const regions=(tree.regions||[]);
+  const charters=[];
+  regions.forEach(function(r){ (r.charters||[]).forEach(function(c){
+    charters.push({id:c.id,name:c.name,region:r.name||"Region"}); }); });
+  (tree.charters||[]).forEach(function(c){ charters.push({id:c.id,name:c.name,region:""}); });
+
+  const body=el("div",{style:"display:flex;flex-direction:column;gap:10px"});
+  function draw(){
+    body.textContent="";
+    if(!people.length) body.append(el("div",{style:"font-size:12.5px;color:var(--muted)"},
+      "Nobody has signed in yet. A man appears here the first time he signs in with the"
+      +" email address he is loaded under on the roll."));
+    people.forEach(function(p){
+      const open = S.permOpen===p.id;
+      const held=(p.clubOffices||[]).map(officeLabel).filter(Boolean);
+      const where=[];
+      (p.charters||[]).forEach(function(c){ if((c.offices||[]).length)
+        where.push(c.name+" ("+c.offices.map(officeLabel).join(", ")+")"); });
+      (p.regions||[]).forEach(function(r){ if((r.offices||[]).length)
+        where.push(r.name+" — region ("+r.offices.map(officeLabel).join(", ")+")"); });
+      const head=el("div",{class:"row",style:"align-items:center;gap:10px"},
+        el("div",{style:"flex:1 1 200px;min-width:0"},
+          el("b",{},p.name||p.email||"Not named"),
+          el("div",{style:"font-size:11.5px;color:var(--muted);word-break:break-all"},
+            (p.email||"no email")
+            + (p.charterName? (" · "+p.charterName) : " · no home charter")),
+          (held.length||where.length)
+            ? el("div",{style:"font-size:11.5px;margin-top:3px"},
+                held.length? el("span",{class:"cat"},held.join(" + ")) : null,
+                where.length? el("span",{style:"color:var(--muted)"}," "+where.join(" · ")) : null)
+            : el("div",{style:"font-size:11.5px;color:var(--bad);margin-top:3px"},
+                "No office anywhere — he can sign in and see nothing")),
+        p.mustChangePassword? el("span",{class:"cat"},"On a temporary password") : null,
+        p.active? null : el("span",{class:"cat"},"Off"),
+        el("button",{class:"btn"+(open?" primary":""),onclick:function(){
+          S.permOpen=open?null:p.id; renderAll(); }}, open? "Close" : "Change"));
+      const card=el("div",{style:"border:1px solid var(--line);border-radius:4px;padding:11px 12px;"
+        +"display:flex;flex-direction:column;gap:9px"},head);
+      if(open) card.append(permPersonForm(p,offs,charters,regions));
+      body.append(card);
+    });
+  }
+  draw();
+  return [
+    el("div",{class:"note"},
+      el("b",{},"A man signs in with the email address he is loaded under."),
+      " Put him on the roll with his email first; he cannot register otherwise. Hand him a"
+      +" temporary password and the app makes him set his own the first time he opens it.",
+      el("div",{style:"margin-top:5px;color:var(--muted)"},
+        "An office here is a job, not a place. Where he does it is set underneath: a role at"
+        +" a charter, or a role in a region, or both, as many as he holds.")),
+    el("section",{class:"panel"},
+      el("header",{},el("h2",{},"Who may sign in"),el("div",{class:"spacer"}),
+        el("span",{style:"font-size:12px;color:var(--muted)"},
+          people.length+(people.length===1?" man":" men"))),
+      el("div",{class:"body"},body))];
+}
+function permPersonForm(p,offs,charters,regions){
+  /* His own copy to work on, so nothing changes until Save is pressed. */
+  const work={
+    clubOffices:(p.clubOffices||[]).slice(),
+    charters:(p.charters||[]).map(function(c){ return {id:c.id,name:c.name,offices:(c.offices||[]).slice()}; }),
+    regions:(p.regions||[]).map(function(r){ return {id:r.id,name:r.name,offices:(r.offices||[]).slice()}; }),
+    charterId:p.charterId||"", active:p.active!==false
+  };
+  const wrap=el("div",{style:"border-top:1px solid var(--line);padding-top:10px;"
+    +"display:flex;flex-direction:column;gap:12px"});
+  const err=el("div",{style:"font-size:12px;color:var(--bad)"});
+
+  /* Where he sits. His home charter is the one his own statement comes from. */
+  const homeSel=el("select",{onchange:function(e){ work.charterId=e.target.value; }},
+    el("option",{value:"",selected:work.charterId?null:true},"— none —"),
+    charters.map(function(c){ return el("option",{value:c.id,
+      selected:c.id===work.charterId?true:null}, c.name+(c.region?(" — "+c.region):"")); }));
+  const activeBox=el("input",{type:"checkbox",checked:work.active?true:null,
+    onchange:function(e){ work.active=e.target.checked; }});
+
+  function ticks(ids,onPick,only){
+    const pool=offs.filter(function(o){ return only? only(o) : true; });
+    return el("div",{class:"row",style:"gap:12px;row-gap:6px;flex-wrap:wrap"},
+      pool.map(function(o){
+        return el("label",{class:"row",style:"gap:6px;align-items:center;font-size:12.5px;flex:0 0 auto"},
+          el("input",{type:"checkbox",checked:(ids.indexOf(o.id)>=0)?true:null,
+            onchange:function(e){
+              const at=ids.indexOf(o.id);
+              if(e.target.checked){ if(at<0) ids.push(o.id); } else if(at>=0) ids.splice(at,1);
+              if(onPick) onPick();
+            }}), o.label);
+      }));
+  }
+
+  /* The offices he holds for the club as a whole - the Overall Admin and the
+     national table. These are not tied to any one charter. */
+  wrap.append(el("div",{},
+    el("div",{class:"eyebrow",style:"margin-bottom:6px"},"For the club as a whole"),
+    ticks(work.clubOffices,null,function(o){ return o.scope==="national"||o.set==="all"; })));
+
+  /* At which charters, and what at each. */
+  const chBox=el("div",{style:"display:flex;flex-direction:column;gap:8px"});
+  function drawCh(){
+    chBox.textContent="";
+    work.charters.forEach(function(row,i){
+      chBox.append(el("div",{style:"border-left:2px solid var(--line);padding:2px 0 6px 12px"},
+        el("div",{class:"row",style:"align-items:center;gap:8px"},
+          el("b",{style:"font-size:12.5px"},row.name||"Charter"),
+          el("div",{class:"spacer"}),
+          el("button",{class:"btn ghost danger",onclick:function(){
+            work.charters.splice(i,1); drawCh(); }},"Remove")),
+        ticks(row.offices,null,function(o){ return o.scope==="charter"||o.scope==="self"; })));
+    });
+    const left=charters.filter(function(c){
+      return !work.charters.some(function(r){ return r.id===c.id; }); });
+    if(left.length) chBox.append(el("div",{class:"row",style:"align-items:flex-end;gap:8px;margin-top:2px"},
+      el("label",{class:"f",style:"flex:1 1 200px"},el("span",{},"Add a charter"),
+        (function(){
+          const sel=el("select",{},el("option",{value:""},"— choose —"),
+            left.map(function(c){ return el("option",{value:c.id},
+              c.name+(c.region?(" — "+c.region):"")); }));
+          sel.addEventListener("change",function(){
+            const c=charters.find(function(x){ return x.id===sel.value; });
+            if(!c) return;
+            work.charters.push({id:c.id,name:c.name,offices:["brother"]});
+            drawCh();
+          });
+          return sel;
+        })())));
+  }
+  drawCh();
+  wrap.append(el("div",{},
+    el("div",{class:"eyebrow",style:"margin-bottom:6px"},"At these charters"),chBox));
+
+  /* In which regions, and what in each. */
+  const rgBox=el("div",{style:"display:flex;flex-direction:column;gap:8px"});
+  function drawRg(){
+    rgBox.textContent="";
+    work.regions.forEach(function(row,i){
+      rgBox.append(el("div",{style:"border-left:2px solid var(--line);padding:2px 0 6px 12px"},
+        el("div",{class:"row",style:"align-items:center;gap:8px"},
+          el("b",{style:"font-size:12.5px"},row.name||"Region"),
+          el("div",{class:"spacer"}),
+          el("button",{class:"btn ghost danger",onclick:function(){
+            work.regions.splice(i,1); drawRg(); }},"Remove")),
+        ticks(row.offices,null,function(o){ return o.scope==="region"; })));
+    });
+    const left=regions.filter(function(r){
+      return !work.regions.some(function(x){ return x.id===r.id; }); });
+    if(left.length) rgBox.append(el("div",{class:"row",style:"align-items:flex-end;gap:8px;margin-top:2px"},
+      el("label",{class:"f",style:"flex:1 1 200px"},el("span",{},"Add a region"),
+        (function(){
+          const sel=el("select",{},el("option",{value:""},"— choose —"),
+            left.map(function(r){ return el("option",{value:r.id},r.name||"Region"); }));
+          sel.addEventListener("change",function(){
+            const r=regions.find(function(x){ return x.id===sel.value; });
+            if(!r) return;
+            work.regions.push({id:r.id,name:r.name,offices:["reg-sec"]});
+            drawRg();
+          });
+          return sel;
+        })())));
+  }
+  drawRg();
+  wrap.append(el("div",{},
+    el("div",{class:"eyebrow",style:"margin-bottom:6px"},"In these regions"),rgBox));
+
+  wrap.append(el("div",{class:"row",style:"align-items:flex-end;gap:12px"},
+    el("label",{class:"f",style:"flex:1 1 200px"},el("span",{},"His home charter"),homeSel),
+    el("label",{class:"row",style:"gap:7px;align-items:center;font-size:12.5px;flex:0 0 auto;padding-bottom:9px"},
+      activeBox,"He may sign in")));
+
+  wrap.append(err);
+  wrap.append(el("div",{class:"row",style:"align-items:center"},
+    el("div",{class:"spacer"}),
+    el("button",{class:"btn",onclick:function(){ S.permOpen=null; renderAll(); }},"Leave it"),
+    el("button",{class:"btn primary",onclick:function(e){
+      const btn=e.target; btn.disabled=true; err.textContent="";
+      const body={clubOffices:work.clubOffices,
+        charters:work.charters.map(function(c){ return {id:c.id,offices:c.offices}; }),
+        regions:work.regions.map(function(r){ return {id:r.id,offices:r.offices}; }),
+        charterId:work.charterId||null, active:work.active};
+      window.__MCF_SERVER__.saveAssignments(p.id,body).then(function(list){
+        S.perm.people=list; S.permOpen=null;
+        toast("Saved for "+(p.name||p.email||"him")+".");
+        renderAll();
+      }).catch(function(x){
+        btn.disabled=false;
+        err.textContent=String((x&&x.message)||x);
+      });
+    }},"Save")));
+  return wrap;
+}
+
+/* -------------------------------------------------------------- the roles */
+function permRoles(){
+  const offs=(S.perm.offices||[]).slice();
+  const screens=S.perm.screens||[];
+  const groups=[];
+  screens.forEach(function(sc){
+    let g=groups.find(function(x){ return x[0]===(sc.grp||"Other"); });
+    if(!g){ g=[sc.grp||"Other",[]]; groups.push(g); }
+    g[1].push(sc);
+  });
+  const body=el("div",{style:"display:flex;flex-direction:column;gap:10px"});
+  function draw(){
+    body.textContent="";
+    offs.forEach(function(o){
+      const open=S.permRole===o.id;
+      const rts=(o.rights&&typeof o.rights==="object")? o.rights : {};
+      const n={none:0,view:0,edit:0};
+      screens.forEach(function(sc){ n[rts[sc.id]||"none"]++; });
+      const head=el("div",{class:"row",style:"align-items:center;gap:10px"},
+        el("div",{style:"flex:1 1 180px;min-width:0"},
+          el("b",{},o.label||o.id),
+          el("div",{style:"font-size:11.5px;color:var(--muted)"},
+            SCOPE_WORD[o.scope||"charter"]+" · "+o.id
+            +(o.builtin? " · one it started with":"")),
+          o.note? el("div",{style:"font-size:11.5px;color:var(--muted);margin-top:2px"},o.note):null),
+        el("span",{class:"cat"},n.edit+" change · "+n.view+" look · "+n.none+" hidden"),
+        el("button",{class:"btn",onclick:function(){
+          S.permRole=o.id+"~copy"; S.permCopy=o; renderAll(); }},"Copy"),
+        o.builtin? null : el("button",{class:"btn ghost danger",onclick:function(){
+          askConfirm("Remove "+(o.label||o.id)+"?",
+            ["The role goes off the list for good.",
+             "The server refuses this outright while anybody still holds it, so take it off"
+             +" them under People first."],
+            "Remove the role", function(){
+              window.__MCF_SERVER__.deleteRole(o.id).then(function(list){
+                S.perm.offices=list; S.permRole=null; toast("Role removed."); renderAll();
+              }).catch(function(x){ toast(String((x&&x.message)||x),true); });
+            });
+        }},"Remove"),
+        el("button",{class:"btn"+(open?" primary":""),onclick:function(){
+          S.permRole=open?null:o.id; S.permCopy=null; renderAll(); }}, open? "Close":"Change"));
+      const card=el("div",{style:"border:1px solid var(--line);border-radius:4px;padding:11px 12px;"
+        +"display:flex;flex-direction:column;gap:9px"},head);
+      if(open) card.append(permRoleForm(o,groups,false));
+      body.append(card);
+    });
+  }
+  draw();
+  const newCard=el("div",{});
+  function drawNew(){
+    newCard.textContent="";
+    if(String(S.permRole||"").indexOf("~copy")>0 || S.permRole==="~new"){
+      const base = S.permCopy || {id:"",label:"",scope:"charter",rights:{},note:""};
+      newCard.append(el("section",{class:"panel"},
+        el("header",{},el("h2",{},S.permCopy? ("A new role from "+(base.label||base.id)) : "A new role")),
+        el("div",{class:"body"},permRoleForm(base,groups,true))));
+    }
+  }
+  drawNew();
+  return [
+    el("div",{class:"note"},
+      el("b",{},"A role says what a man may do; it does not say where."),
+      " The same Treasurer role serves every charter in the club — which charter he is"
+      +" treasurer of is set under People.",
+      el("div",{style:"margin-top:5px"},
+        el("b",{},"Hidden")," — he does not know the screen is there. ",
+        el("b",{},"May look")," — he reads and prints it, changes nothing. ",
+        el("b",{},"May change")," — he captures and corrects on it."),
+      el("div",{style:"margin-top:5px;color:var(--muted)"},
+        "The database works the document rights out of these, so a screen a man cannot open"
+        +" is a document he cannot read, whichever way he comes at it.")),
+    el("section",{class:"panel"},
+      el("header",{},el("h2",{},"The club's roles"),el("div",{class:"spacer"}),
+        el("button",{class:"btn primary",onclick:function(){
+          S.permRole="~new"; S.permCopy=null; renderAll(); }},"Write a new role")),
+      el("div",{class:"body"},body)),
+    newCard];
+}
+function permRoleForm(o,groups,isNew){
+  const work={
+    id:isNew? "" : o.id,
+    label:isNew? ((o.label||"")+(o.label?" (copy)":"")) : (o.label||""),
+    scope:o.scope||"charter",
+    note:o.note||"",
+    sort:(o.sort==null?100:o.sort),
+    rights:Object.assign({},(o.rights&&typeof o.rights==="object")? o.rights : {})
+  };
+  const wrap=el("div",{style:"display:flex;flex-direction:column;gap:12px"});
+  const err=el("div",{style:"font-size:12px;color:var(--bad)"});
+  const idIn=el("input",{type:"text",value:work.id,placeholder:"road-captain",
+    disabled:isNew?null:true,oninput:function(e){ work.id=e.target.value; }});
+  const labelIn=el("input",{type:"text",value:work.label,placeholder:"Road Captain",
+    oninput:function(e){ work.label=e.target.value; }});
+  const noteIn=el("input",{type:"text",value:work.note,placeholder:"What this role is for",
+    oninput:function(e){ work.note=e.target.value; }});
+  const scopeSel=el("select",{onchange:function(e){ work.scope=e.target.value; }},
+    ["charter","region","national","self"].map(function(v){
+      return el("option",{value:v,selected:v===work.scope?true:null},SCOPE_WORD[v]); }));
+
+  wrap.append(el("div",{class:"row",style:"align-items:flex-end;gap:10px"},
+    el("label",{class:"f",style:"flex:1 1 170px"},el("span",{},"Name people will see"),labelIn),
+    el("label",{class:"f",style:"flex:0 1 150px"},el("span",{},"Short name"),idIn,
+      isNew? el("span",{style:"font-size:11px;color:var(--muted)"},"letters, numbers and dashes")
+           : el("span",{style:"font-size:11px;color:var(--muted)"},"cannot be changed")),
+    el("label",{class:"f",style:"flex:0 1 160px"},el("span",{},"How far he sees"),scopeSel)));
+  wrap.append(el("label",{class:"f"},el("span",{},"A note, if it helps"),noteIn));
+
+  const matrix=el("div",{style:"display:flex;flex-direction:column;gap:12px"});
+  function row(sc){
+    const cur=work.rights[sc.id]||"none";
+    const pick=el("div",{class:"row",style:"gap:4px;flex:0 0 auto"});
+    ["none","view","edit"].forEach(function(lv){
+      pick.append(el("button",{class:"btn"+(cur===lv?" primary":""),
+        style:"padding:3px 9px;font-size:11.5px",
+        onclick:function(){ work.rights[sc.id]=lv; drawMatrix(); }},LEVEL_WORD[lv]));
+    });
+    return el("div",{class:"row",style:"align-items:center;gap:10px;padding:2px 0"},
+      el("div",{style:"flex:1 1 140px;min-width:0;font-size:12.5px"},sc.label,
+        sc.doc? el("span",{style:"color:var(--muted)"}," · "+sc.doc) : null),
+      pick);
+  }
+  function drawMatrix(){
+    matrix.textContent="";
+    groups.forEach(function(g){
+      matrix.append(el("div",{},
+        el("div",{class:"row",style:"align-items:center;gap:8px;margin-bottom:4px"},
+          el("div",{class:"eyebrow"},g[0]),
+          el("div",{class:"spacer"}),
+          ["none","view","edit"].map(function(lv){
+            return el("button",{class:"btn ghost",style:"padding:2px 7px;font-size:11px",
+              onclick:function(){
+                g[1].forEach(function(sc){ work.rights[sc.id]=lv; }); drawMatrix(); }},
+              "all "+LEVEL_WORD[lv].toLowerCase()); })),
+        el("div",{style:"border-left:2px solid var(--line);padding-left:11px"},
+          g[1].map(row))));
+    });
+  }
+  drawMatrix();
+  wrap.append(matrix);
+  wrap.append(err);
+  wrap.append(el("div",{class:"row",style:"align-items:center"},
+    el("div",{class:"spacer"}),
+    el("button",{class:"btn",onclick:function(){
+      S.permRole=null; S.permCopy=null; renderAll(); }},"Leave it"),
+    el("button",{class:"btn primary",onclick:function(e){
+      const btn=e.target; btn.disabled=true; err.textContent="";
+      window.__MCF_SERVER__.saveRole({id:work.id,label:work.label,scope:work.scope,
+        note:work.note,sort:work.sort,rights:work.rights,
+        settings:(work.rights.global==="edit")?"all":(work.rights.settings==="edit")?"charter":"none"
+      }).then(function(list){
+        S.perm.offices=list; S.permRole=null; S.permCopy=null;
+        toast("Role saved."); renderAll();
+      }).catch(function(x){
+        btn.disabled=false; err.textContent=String((x&&x.message)||x);
+      });
+    }},isNew? "Write it" : "Save")));
+  return wrap;
+}
+
+/* ---- the two local permission panels, now shown on the Permissions screen ---- */
+function panelWhoCanOpen(){
+      const a=accessCfg();
+      const list=a.roles.map(r=>Object.assign({},r));
+      const box=el("div",{style:"display:flex;flex-direction:column;gap:8px"});
+      const pick=el("input",{type:"text",id:"rl-find",placeholder:"Search by name"});
+      const results=el("div",{class:"row"});
+      const codeIn=el("input",{type:"text",id:"rl-code",placeholder:"Paste the code they sent you"});
+      function add(id,name){
+        if(!id) return;
+        if(list.some(r=>r.id===id)){ toast("Already on the list.",true); return; }
+        if(name) S.names[id]=name;
+        list.push({id:id,offices:["brother"]}); draw();
+      }
+      function draw(){
+        box.textContent="";
+        if(!list.length) box.append(el("div",{style:"font-size:12.5px;color:var(--muted)"},
+          "Nobody added yet. While this list is empty only you can open the books."));
+        list.forEach((r,i)=>{
+          const g=grantsOf(r);
+          const tag=el("span",{class:"cat"},roleLabel(g));
+          const picker=officePicker(
+            officesOf(r).length? officesOf(r) : officesForRank(signerMember(r)? signerMember(r).status : ""),
+            function(sel){ list[i].offices=sel; list[i].admin=false; list[i].fin=""; list[i].min=""; list[i].level=""; });
+          box.append(el("div",{style:"border:1px solid var(--line);border-radius:4px;padding:11px 12px;display:flex;flex-direction:column;gap:9px"},
+            el("div",{class:"row",style:"align-items:center;gap:10px"},
+              el("div",{style:"flex:1 1 170px;min-width:0"},
+                el("b",{},signerMember(r)? signerMember(r).knownAs : (r.name||"Not linked")),
+                el("div",{style:"font-size:10.5px;color:var(--muted);word-break:break-all"},r.id)),
+              tag,
+              el("button",{class:"btn ghost danger",onclick:()=>{ list.splice(i,1); draw(); }},"Remove")),
+            el("div",{class:"row",style:"align-items:flex-end;gap:10px"},
+              el("label",{class:"f",style:"flex:1 1 210px"},el("span",{},"Which brother on the roll"),
+                signerPicker(r.memberId,list.map(x=>x.memberId),v=>{ list[i].memberId=v; draw(); }),
+                (!r.memberId)? el("span",{style:"font-size:11px;color:var(--bad)"},
+                  "Only brothers on the roll may sign in")
+                : (signerMember(r)&&!signerMember(r).active)? el("span",{style:"font-size:11px;color:var(--warn)"},
+                  "He is off the roll") : null)),
+            el("div",{},
+              el("div",{class:"eyebrow",style:"margin-bottom:7px"},"What he holds"),
+              picker)));
+        });
+        box.append(el("div",{class:"row",style:"align-items:center;margin-top:4px"},
+          el("div",{class:"spacer"}),
+          el("button",{class:"btn primary",onclick:()=>{
+            const missing=list.filter(r=>!r.memberId).length;
+            if(missing){ toast(missing===1? "One of them is not linked to a brother on the roll."
+              : missing+" of them are not linked to a brother on the roll.",true); return; }
+            saveAccess({roles:list.map(function(r){
+              let offs=Array.isArray(r.offices)? r.offices.filter(office) : officesOf(r);
+              if(!offs.length) offs=officesForRank((member(r.memberId)||{}).status);
+              return {id:r.id,memberId:r.memberId,
+                      name:(member(r.memberId)||{}).knownAs||"", offices:offs};
+            })}).then(()=>{ toast("Access saved."); renderAll(); });
+          }},"Save who can open the books")));
+        primeNames(list.map(r=>r.id),()=>{});
+      }
+      draw();
+      const canSearch = S.user && S.user.search;
+      if(canSearch) pick.addEventListener("input",()=>{
+        const q=pick.value.trim();
+        S.user.search(q).then(hits=>{
+          results.textContent="";
+          (hits||[]).slice(0,6).forEach(h=>results.append(
+            el("button",{class:"btn",onclick:()=>{ add(h.id,h.name); pick.value=""; results.textContent=""; }},
+              h.name||"Someone")));
+        }).catch(()=>{});
+      });
+
+      return el("section",{class:"panel"},
+        el("header",{},el("h2",{},"Who can open the books"),el("div",{class:"spacer"}),
+          el("span",{style:"font-size:12px;color:var(--muted)"},"Three roles \u00b7 everyone else is turned away")),
+        el("div",{class:"body",style:"display:flex;flex-direction:column;gap:14px"},
+          el("div",{class:"note"},
+            el("div",{},el("b",{},"Can View Finances")," \u2014 reads and prints the books. No capturing, no changing."),
+            el("div",{style:"margin-top:4px"},el("b",{},"Can Edit Finance")," \u2014 captures and changes entries, runs the monthly charges, records arrangements."),
+            el("div",{style:"margin-top:4px"},el("b",{},"Can View Minutes")," \u2014 reads and prints the meeting minutes."),
+            el("div",{style:"margin-top:4px"},el("b",{},"Can Edit Minutes")," \u2014 captures and corrects minutes."),
+            el("div",{style:"margin-top:4px"},el("b",{},"Can View All")," \u2014 the button beside each person: reads both the books and the minutes."),
+            el("div",{style:"margin-top:4px"},el("b",{},"Admin")," \u2014 all of that plus Settings, the roll, deleting members and restoring backups."),
+            el("div",{style:"margin-top:7px;color:var(--muted)"},
+              "Documents are open to everyone on this list, whatever else they may or may not see. Anyone not on the list is turned away at the door.")),
+          el("div",{class:"note",style:"border-color:var(--brass)"},
+            el("b",{},"Only brothers on the roll can sign in."),
+            " Every line below has to point at somebody under Members. If he is not on the roll he cannot be given access \u2014 put him on the roll first. "
+            +"He is then known by his road name everywhere in the books, and the change log carries that name."),
+          canSearch? el("div",{},
+            el("label",{class:"f"},el("span",{},"Find someone by name"),pick), results) : null,
+          el("div",{class:"row",style:"align-items:flex-end"},
+            el("label",{class:"f",style:"flex:1 1 240px"},el("span",{},"Or add them by the code they sent you"),codeIn),
+            el("button",{class:"btn",onclick:()=>{ const v=codeIn.value.trim();
+              if(!v){ toast("Paste their code first.",true); return; }
+              add(v,""); codeIn.value=""; }},"Add")),
+          box,
+          el("div",{style:"font-size:12.5px;color:var(--muted)"},
+            "They must also be given the link from the Share menu \u2014 ",
+            el("b",{},"Can edit")," for Admin and Can Edit Finance, ",el("b",{},"Can view"),
+            " for Can View Finances. This list decides what they see once they are in.")));
+}
+
+function panelLocalSignIn(){
+      const a=accessCfg();
+      const rows=el("div",{style:"display:flex;flex-direction:column;gap:8px"});
+      const people=a.people.map(p=>Object.assign({},p));
+      function draw(){
+        rows.textContent="";
+        if(!people.length) rows.append(el("div",{style:"font-size:12.5px;color:var(--muted)"},
+          "Nobody on the list yet. Add whichever brothers sit at this PC \u2014 each one picked off the roll."));
+        people.forEach((p,i)=>{
+          const mm=signerMember(p);
+          rows.append(el("div",{class:"row",style:"align-items:flex-end;gap:10px;margin-top:4px"},
+            el("label",{class:"f",style:"flex:1 1 200px"},el("span",{},"Which brother"),
+              signerPicker(p.memberId,people.map(x=>x.memberId),v=>{
+                p.memberId=v; const m=member(v);
+                if(m){ p.name=m.knownAs; p.role=m.status||""; }
+                draw(); }),
+              (!p.memberId)? el("span",{style:"font-size:11px;color:var(--bad)"},
+                "Pick him off the roll \u2014 only members may sign in")
+              : (mm&&!mm.active)? el("span",{style:"font-size:11px;color:var(--warn)"},
+                "He is off the roll") : null),
+            el("label",{class:"f",style:"flex:0 1 120px"},el("span",{},p.pinHash?"New PIN":"PIN"),
+              el("input",{type:"password",id:"ap-p"+i,placeholder:p.pinHash?"unchanged":"optional",
+                oninput:e=>p.newPin=e.target.value})),
+            el("button",{class:"btn ghost danger",onclick:()=>{people.splice(i,1);draw();}},"Remove")));
+          rows.append(el("div",{style:"border-left:2px solid var(--line);margin:-2px 0 10px 2px;padding:2px 0 8px 12px"},
+            el("div",{class:"eyebrow",style:"margin-bottom:7px"},
+              "What "+(mm? mm.knownAs : "he")+" holds"),
+            officePicker(officesOf(p).length? officesOf(p) : officesForRank(mm? mm.status : ""),
+              function(sel){ p.offices=sel; p.admin=false; p.fin=""; p.min=""; p.level=""; })));
+        });
+        rows.append(el("div",{class:"row",style:"align-items:center;margin-top:4px"},
+          el("button",{class:"btn",onclick:()=>{
+            people.push({id:"local:"+uid("p"),memberId:"",name:"",role:"",pinHash:"",
+              offices:(people.length? ["brother"] : ["admin"])}); draw(); }},"Add a brother"),
+          el("div",{class:"spacer"}),
+          el("button",{class:"btn primary",onclick:async()=>{
+            const missing=people.filter(p=>!p.memberId).length;
+            if(missing){ toast(missing===1? "One line has nobody chosen. Only brothers on the roll may sign in."
+              : missing+" lines have nobody chosen. Only brothers on the roll may sign in.",true); return; }
+            const out=[];
+            const noAdmin=!people.some(function(p){
+              const o=Array.isArray(p.offices)? p.offices : officesOf(p);
+              return o.indexOf("admin")>=0; });
+            if(noAdmin){ toast("Somebody has to be the Overall Admin, or nobody can reach these settings again.",true); return; }
+            for(const p of people){
+              const m=member(p.memberId); if(!m) continue;
+              let h=p.pinHash||"";
+              if(p.newPin) h=await sha256hex(p.newPin);
+              let offs=Array.isArray(p.offices)? p.offices.filter(office) : officesOf(p);
+              if(!offs.length) offs=officesForRank(m.status);
+              out.push({id:p.id,memberId:p.memberId,name:m.knownAs,role:(p.role||m.status||"").trim(),
+                pinHash:h, offices:offs});
+            }
+            saveAccess({people:out}).then(()=>{
+              toast("Sign-in list saved.");
+              /* The moment there is a list, the app wants to know who is at the
+                 phone. Without this the man who just set it up is left on
+                 Documents only, with Settings gone, wondering what he broke. */
+              if(!S.me && out.length){ S.unlocked=false; renderAll(); showLock(); return; }
+              computeLevel(); renderAll();
+            });
+          }},"Save the list")));
+      }
+      draw();
+
+      const pinOn=el("input",{type:"checkbox",id:"ac-pinon",checked:a.pinOn?true:null});
+      const pinNew=el("input",{type:"password",id:"ac-pin",placeholder:a.pinHash?"leave blank to keep":"choose a PIN"});
+      return el("section",{class:"panel"},
+        el("header",{},el("h2",{},"Sign in"),el("div",{class:"spacer"}),
+          el("span",{style:"font-size:12px;color:var(--muted)"},
+            S.user? "Who you are comes from your Claude account" : "No accounts here \u2014 this PC copy asks who you are")),
+        el("div",{class:"body",style:"display:flex;flex-direction:column;gap:14px"},
+          S.user? el("div",{class:"note"},
+              el("b",{},"You are signed in as "+(S.myName||"your Claude account")+"."),
+              " Everyone you share the app with signs in as themselves, and the change log names them. "
+              +"A PIN below is optional \u2014 it only keeps the books off the screen if you walk away.")
+            : el("div",{class:"note bad"},
+              el("b",{},"This copy has no accounts.")," Whoever you pick below is the name stamped on entries. "
+              +"It is a latch, not a safe: anyone with this PC and some know-how can read past it."),
+          el("div",{},
+            el("label",{class:"row",style:"align-items:center;gap:8px;font-weight:600"},pinOn,
+              "Ask for a PIN when the app opens"),
+            el("div",{class:"row",style:"align-items:flex-end;margin-top:10px;gap:10px"},
+              el("label",{class:"f",style:"flex:0 1 200px"},el("span",{},"Club PIN"),pinNew),
+              el("button",{class:"btn primary",onclick:async()=>{
+                const patch={pinOn:pinOn.checked};
+                if(pinNew.value) patch.pinHash=await sha256hex(pinNew.value);
+                if(patch.pinOn && !patch.pinHash && !a.pinHash){
+                  toast("Choose a PIN before switching it on.",true); return; }
+                saveAccess(patch).then(()=>{ pinNew.value=""; toast("Sign-in settings saved."); renderAll(); });
+              }},"Save"))),
+          el("div",{},
+            el("div",{class:"eyebrow",style:"margin-bottom:8px"},
+              S.user? "Who may sign in on the PC copy" : "Who may sign in"),
+            rows)));
+}
+
 function viewSettings(){
   const c=S.club;
   const f={};
@@ -15460,201 +16233,18 @@ function viewSettings(){
         el("span",{style:"font-size:12px;color:var(--muted)"},"Office bearers are highlighted across the app")),
       el("div",{class:"body"},rankBox)),
 
-    (function(){
-      const a=accessCfg();
-      const list=a.roles.map(r=>Object.assign({},r));
-      const box=el("div",{style:"display:flex;flex-direction:column;gap:8px"});
-      const pick=el("input",{type:"text",id:"rl-find",placeholder:"Search by name"});
-      const results=el("div",{class:"row"});
-      const codeIn=el("input",{type:"text",id:"rl-code",placeholder:"Paste the code they sent you"});
-      function add(id,name){
-        if(!id) return;
-        if(list.some(r=>r.id===id)){ toast("Already on the list.",true); return; }
-        if(name) S.names[id]=name;
-        list.push({id:id,offices:["brother"]}); draw();
-      }
-      function draw(){
-        box.textContent="";
-        if(!list.length) box.append(el("div",{style:"font-size:12.5px;color:var(--muted)"},
-          "Nobody added yet. While this list is empty only you can open the books."));
-        list.forEach((r,i)=>{
-          const g=grantsOf(r);
-          const tag=el("span",{class:"cat"},roleLabel(g));
-          const picker=officePicker(
-            officesOf(r).length? officesOf(r) : officesForRank(signerMember(r)? signerMember(r).status : ""),
-            function(sel){ list[i].offices=sel; list[i].admin=false; list[i].fin=""; list[i].min=""; list[i].level=""; });
-          box.append(el("div",{style:"border:1px solid var(--line);border-radius:4px;padding:11px 12px;display:flex;flex-direction:column;gap:9px"},
-            el("div",{class:"row",style:"align-items:center;gap:10px"},
-              el("div",{style:"flex:1 1 170px;min-width:0"},
-                el("b",{},signerMember(r)? signerMember(r).knownAs : (r.name||"Not linked")),
-                el("div",{style:"font-size:10.5px;color:var(--muted);word-break:break-all"},r.id)),
-              tag,
-              el("button",{class:"btn ghost danger",onclick:()=>{ list.splice(i,1); draw(); }},"Remove")),
-            el("div",{class:"row",style:"align-items:flex-end;gap:10px"},
-              el("label",{class:"f",style:"flex:1 1 210px"},el("span",{},"Which brother on the roll"),
-                signerPicker(r.memberId,list.map(x=>x.memberId),v=>{ list[i].memberId=v; draw(); }),
-                (!r.memberId)? el("span",{style:"font-size:11px;color:var(--bad)"},
-                  "Only brothers on the roll may sign in")
-                : (signerMember(r)&&!signerMember(r).active)? el("span",{style:"font-size:11px;color:var(--warn)"},
-                  "He is off the roll") : null)),
-            el("div",{},
-              el("div",{class:"eyebrow",style:"margin-bottom:7px"},"What he holds"),
-              picker)));
-        });
-        box.append(el("div",{class:"row",style:"align-items:center;margin-top:4px"},
-          el("div",{class:"spacer"}),
-          el("button",{class:"btn primary",onclick:()=>{
-            const missing=list.filter(r=>!r.memberId).length;
-            if(missing){ toast(missing===1? "One of them is not linked to a brother on the roll."
-              : missing+" of them are not linked to a brother on the roll.",true); return; }
-            saveAccess({roles:list.map(function(r){
-              let offs=Array.isArray(r.offices)? r.offices.filter(office) : officesOf(r);
-              if(!offs.length) offs=officesForRank((member(r.memberId)||{}).status);
-              return {id:r.id,memberId:r.memberId,
-                      name:(member(r.memberId)||{}).knownAs||"", offices:offs};
-            })}).then(()=>{ toast("Access saved."); renderAll(); });
-          }},"Save who can open the books")));
-        primeNames(list.map(r=>r.id),()=>{});
-      }
-      draw();
-      const canSearch = S.user && S.user.search;
-      if(canSearch) pick.addEventListener("input",()=>{
-        const q=pick.value.trim();
-        S.user.search(q).then(hits=>{
-          results.textContent="";
-          (hits||[]).slice(0,6).forEach(h=>results.append(
-            el("button",{class:"btn",onclick:()=>{ add(h.id,h.name); pick.value=""; results.textContent=""; }},
-              h.name||"Someone")));
-        }).catch(()=>{});
-      });
-
-      return el("section",{class:"panel"},
-        el("header",{},el("h2",{},"Who can open the books"),el("div",{class:"spacer"}),
-          el("span",{style:"font-size:12px;color:var(--muted)"},"Three roles \u00b7 everyone else is turned away")),
-        el("div",{class:"body",style:"display:flex;flex-direction:column;gap:14px"},
-          el("div",{class:"note"},
-            el("div",{},el("b",{},"Can View Finances")," \u2014 reads and prints the books. No capturing, no changing."),
-            el("div",{style:"margin-top:4px"},el("b",{},"Can Edit Finance")," \u2014 captures and changes entries, runs the monthly charges, records arrangements."),
-            el("div",{style:"margin-top:4px"},el("b",{},"Can View Minutes")," \u2014 reads and prints the meeting minutes."),
-            el("div",{style:"margin-top:4px"},el("b",{},"Can Edit Minutes")," \u2014 captures and corrects minutes."),
-            el("div",{style:"margin-top:4px"},el("b",{},"Can View All")," \u2014 the button beside each person: reads both the books and the minutes."),
-            el("div",{style:"margin-top:4px"},el("b",{},"Admin")," \u2014 all of that plus Settings, the roll, deleting members and restoring backups."),
-            el("div",{style:"margin-top:7px;color:var(--muted)"},
-              "Documents are open to everyone on this list, whatever else they may or may not see. Anyone not on the list is turned away at the door.")),
-          el("div",{class:"note",style:"border-color:var(--brass)"},
-            el("b",{},"Only brothers on the roll can sign in."),
-            " Every line below has to point at somebody under Members. If he is not on the roll he cannot be given access \u2014 put him on the roll first. "
-            +"He is then known by his road name everywhere in the books, and the change log carries that name."),
-          canSearch? el("div",{},
-            el("label",{class:"f"},el("span",{},"Find someone by name"),pick), results) : null,
-          el("div",{class:"row",style:"align-items:flex-end"},
-            el("label",{class:"f",style:"flex:1 1 240px"},el("span",{},"Or add them by the code they sent you"),codeIn),
-            el("button",{class:"btn",onclick:()=>{ const v=codeIn.value.trim();
-              if(!v){ toast("Paste their code first.",true); return; }
-              add(v,""); codeIn.value=""; }},"Add")),
-          box,
-          el("div",{style:"font-size:12.5px;color:var(--muted)"},
-            "They must also be given the link from the Share menu \u2014 ",
-            el("b",{},"Can edit")," for Admin and Can Edit Finance, ",el("b",{},"Can view"),
-            " for Can View Finances. This list decides what they see once they are in.")));
-    })(),
-
-    (function(){
-      const a=accessCfg();
-      const rows=el("div",{style:"display:flex;flex-direction:column;gap:8px"});
-      const people=a.people.map(p=>Object.assign({},p));
-      function draw(){
-        rows.textContent="";
-        if(!people.length) rows.append(el("div",{style:"font-size:12.5px;color:var(--muted)"},
-          "Nobody on the list yet. Add whichever brothers sit at this PC \u2014 each one picked off the roll."));
-        people.forEach((p,i)=>{
-          const mm=signerMember(p);
-          rows.append(el("div",{class:"row",style:"align-items:flex-end;gap:10px;margin-top:4px"},
-            el("label",{class:"f",style:"flex:1 1 200px"},el("span",{},"Which brother"),
-              signerPicker(p.memberId,people.map(x=>x.memberId),v=>{
-                p.memberId=v; const m=member(v);
-                if(m){ p.name=m.knownAs; p.role=m.status||""; }
-                draw(); }),
-              (!p.memberId)? el("span",{style:"font-size:11px;color:var(--bad)"},
-                "Pick him off the roll \u2014 only members may sign in")
-              : (mm&&!mm.active)? el("span",{style:"font-size:11px;color:var(--warn)"},
-                "He is off the roll") : null),
-            el("label",{class:"f",style:"flex:0 1 120px"},el("span",{},p.pinHash?"New PIN":"PIN"),
-              el("input",{type:"password",id:"ap-p"+i,placeholder:p.pinHash?"unchanged":"optional",
-                oninput:e=>p.newPin=e.target.value})),
-            el("button",{class:"btn ghost danger",onclick:()=>{people.splice(i,1);draw();}},"Remove")));
-          rows.append(el("div",{style:"border-left:2px solid var(--line);margin:-2px 0 10px 2px;padding:2px 0 8px 12px"},
-            el("div",{class:"eyebrow",style:"margin-bottom:7px"},
-              "What "+(mm? mm.knownAs : "he")+" holds"),
-            officePicker(officesOf(p).length? officesOf(p) : officesForRank(mm? mm.status : ""),
-              function(sel){ p.offices=sel; p.admin=false; p.fin=""; p.min=""; p.level=""; })));
-        });
-        rows.append(el("div",{class:"row",style:"align-items:center;margin-top:4px"},
-          el("button",{class:"btn",onclick:()=>{
-            people.push({id:"local:"+uid("p"),memberId:"",name:"",role:"",pinHash:"",
-              offices:(people.length? ["brother"] : ["admin"])}); draw(); }},"Add a brother"),
-          el("div",{class:"spacer"}),
-          el("button",{class:"btn primary",onclick:async()=>{
-            const missing=people.filter(p=>!p.memberId).length;
-            if(missing){ toast(missing===1? "One line has nobody chosen. Only brothers on the roll may sign in."
-              : missing+" lines have nobody chosen. Only brothers on the roll may sign in.",true); return; }
-            const out=[];
-            const noAdmin=!people.some(function(p){
-              const o=Array.isArray(p.offices)? p.offices : officesOf(p);
-              return o.indexOf("admin")>=0; });
-            if(noAdmin){ toast("Somebody has to be the Overall Admin, or nobody can reach these settings again.",true); return; }
-            for(const p of people){
-              const m=member(p.memberId); if(!m) continue;
-              let h=p.pinHash||"";
-              if(p.newPin) h=await sha256hex(p.newPin);
-              let offs=Array.isArray(p.offices)? p.offices.filter(office) : officesOf(p);
-              if(!offs.length) offs=officesForRank(m.status);
-              out.push({id:p.id,memberId:p.memberId,name:m.knownAs,role:(p.role||m.status||"").trim(),
-                pinHash:h, offices:offs});
-            }
-            saveAccess({people:out}).then(()=>{
-              toast("Sign-in list saved.");
-              /* The moment there is a list, the app wants to know who is at the
-                 phone. Without this the man who just set it up is left on
-                 Documents only, with Settings gone, wondering what he broke. */
-              if(!S.me && out.length){ S.unlocked=false; renderAll(); showLock(); return; }
-              computeLevel(); renderAll();
-            });
-          }},"Save the list")));
-      }
-      draw();
-
-      const pinOn=el("input",{type:"checkbox",id:"ac-pinon",checked:a.pinOn?true:null});
-      const pinNew=el("input",{type:"password",id:"ac-pin",placeholder:a.pinHash?"leave blank to keep":"choose a PIN"});
-      return el("section",{class:"panel"},
-        el("header",{},el("h2",{},"Sign in"),el("div",{class:"spacer"}),
-          el("span",{style:"font-size:12px;color:var(--muted)"},
-            S.user? "Who you are comes from your Claude account" : "No accounts here \u2014 this PC copy asks who you are")),
-        el("div",{class:"body",style:"display:flex;flex-direction:column;gap:14px"},
-          S.user? el("div",{class:"note"},
-              el("b",{},"You are signed in as "+(S.myName||"your Claude account")+"."),
-              " Everyone you share the app with signs in as themselves, and the change log names them. "
-              +"A PIN below is optional \u2014 it only keeps the books off the screen if you walk away.")
-            : el("div",{class:"note bad"},
-              el("b",{},"This copy has no accounts.")," Whoever you pick below is the name stamped on entries. "
-              +"It is a latch, not a safe: anyone with this PC and some know-how can read past it."),
-          el("div",{},
-            el("label",{class:"row",style:"align-items:center;gap:8px;font-weight:600"},pinOn,
-              "Ask for a PIN when the app opens"),
-            el("div",{class:"row",style:"align-items:flex-end;margin-top:10px;gap:10px"},
-              el("label",{class:"f",style:"flex:0 1 200px"},el("span",{},"Club PIN"),pinNew),
-              el("button",{class:"btn primary",onclick:async()=>{
-                const patch={pinOn:pinOn.checked};
-                if(pinNew.value) patch.pinHash=await sha256hex(pinNew.value);
-                if(patch.pinOn && !patch.pinHash && !a.pinHash){
-                  toast("Choose a PIN before switching it on.",true); return; }
-                saveAccess(patch).then(()=>{ pinNew.value=""; toast("Sign-in settings saved."); renderAll(); });
-              }},"Save"))),
-          el("div",{},
-            el("div",{class:"eyebrow",style:"margin-bottom:8px"},
-              S.user? "Who may sign in on the PC copy" : "Who may sign in"),
-            rows)));
-    })(),
+    /* The permissions used to sit here. They are one screen of their own now -
+       Permissions - so there is a single place where it is decided who may open
+       what, instead of two halves that disagreed with each other. */
+    (setAll()||isAdmin())? el("section",{class:"panel"},
+      el("header",{},el("h2",{},"Who may open what")),
+      el("div",{class:"body"},
+        el("div",{class:"note"},
+          el("b",{},"This moved."),
+          " Who may sign in, which charters and regions a man answers for, and what each"
+          +" role may see and change, are all on the Permissions screen now.",
+          el("div",{class:"row",style:"margin-top:10px"},
+            el("button",{class:"btn primary",onclick:()=>go("perms")},"Open Permissions"))))) : null,
 
     el("section",{class:"panel"},
       el("header",{},el("h2",{},"Backup")),
@@ -17403,6 +17993,7 @@ function renderView(){
     : S.view==="reconcile"?viewReconcile()
     : S.view==="reports"?viewReports()
     : S.view==="global"?viewGlobal()
+    : S.view==="perms"?viewPerms()
     : S.view==="rollup"?viewRollup() : viewSettings();
   const finArea = finView() && ["dash","bank","members","member","events","event","reports"].indexOf(S.view)>=0;
   if(!S.writable && finArea) v.append(el("div",{class:"note bad"},
@@ -17483,6 +18074,9 @@ function renderAll(){
     : S.view==="region"? "The diary, lifted to your region and to the whole country"
     : S.view==="badstanding"? "Names every charter in the club should know"
     : S.view==="transfers"? "A brother moves on two signatures, never one"
+    : S.view==="perms"? (permTab()==="roles"
+        ? "What each role may see, look at and change"
+        : "Who may sign in, and what he holds where")
     : "Logos, club details and standing charges";
   $("#vSub").textContent=sub||" ";
   const act=$("#vActions"); act.textContent=""; appendAll(act,viewActions());
