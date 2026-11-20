@@ -5442,7 +5442,25 @@ function viewBirthdays(){
   }
 
   const body=el("div",{});
-  if(state==="soon"){
+  if(state==="cal"){
+    const k=bdayMonthKey();
+    const mon=Number(k.slice(5,7));
+    const n=list.filter(function(b){ return b.month===mon; }).length;
+    body.append(
+      el("div",{class:"row",style:"align-items:center;gap:9px;flex-wrap:wrap"},
+        el("button",{class:"btn ghost",onclick:function(){ setBdayMonth(addMonth(k,-1)); }},
+          "\u2039 "+MONTH_FULL[(mon+10)%12]),
+        el("b",{style:"font-size:15px;min-width:132px;text-align:center"},MONTH_FULL[mon-1]),
+        el("button",{class:"btn ghost",onclick:function(){ setBdayMonth(addMonth(k,1)); }},
+          MONTH_FULL[mon%12]+" \u203a"),
+        el("div",{class:"spacer"}),
+        el("span",{style:"font-size:12.5px;color:var(--muted)"},
+          n? plural(n,"birthday","birthdays")+" this month" : "nobody this month"),
+        k!==thisMonthKey()
+          ? el("button",{class:"btn",onclick:function(){ setBdayMonth(thisMonthKey()); }},
+              "This month") : null),
+      bdayCalendar(k,list));
+  } else if(state==="soon"){
     if(!soon.length) body.append(el("div",{style:"font-size:12.5px;color:var(--muted)"},
       "Nothing in the next two months."));
     soon.forEach(function(b){ body.append(line(b,true)); });
@@ -5470,12 +5488,86 @@ function viewBirthdays(){
           onclick:function(){ setF("soon"); }},"Coming up"),
         el("button",{class:"btn"+(state==="all"?" primary":""),
           onclick:function(){ setF("all"); }},"The whole year"),
-        list.length? el("button",{class:"btn ghost",onclick:printBirthdays},"Print"):null),
+        el("button",{class:"btn"+(state==="cal"?" primary":""),
+          onclick:function(){ setF("cal"); }},"Calendar"),
+        list.length? el("button",{class:"btn ghost",
+          onclick: state==="cal"? printBirthdayCalendar : printBirthdays},
+          state==="cal"? "Print the calendar" : "Print"):null),
       el("div",{class:"body"},
         el("div",{style:"font-size:11.5px;color:var(--muted);margin-bottom:4px"},
           list.length+(list.length===1?" birthday":" birthdays")+" · "+scope
           +" The day only — no ages, and nothing else of anybody's."),
         body))];
+}
+/* ===================== the birthdays as a month =====================
+   The same grid the diary uses, so the club only ever learns one calendar.
+   A birthday has no year on it - a man's day comes round every year - so the
+   month being shown decides nothing except which days are drawn. */
+/* viewBirthdays keeps a local list it calls `today`, so the function of that
+   name is out of reach in there. This is how the month gets asked for. */
+function thisMonthKey(){ return today().slice(0,7); }
+function bdayMonthKey(){
+  const f=S.filters||{};
+  if(f.bdayMonth) return f.bdayMonth;
+  return thisMonthKey();
+}
+function setBdayMonth(k){
+  S.filters=S.filters||{}; S.filters.bdayMonth=k; renderAll();
+}
+function bdayCalendar(k,list,opts){
+  opts=opts||{};
+  const mon=Number(k.slice(5,7));
+  const n=monthDays(k), start=monthStartDow(k), tod=today();
+  const cells=[];
+  for(let i=0;i<start;i++) cells.push(null);
+  for(let d=1;d<=n;d++) cells.push(d);
+  while(cells.length%7) cells.push(null);
+  const rows=[];
+  for(let i=0;i<cells.length;i+=7) rows.push(cells.slice(i,i+7));
+  return el("table",{class:"cal"+(opts.print?" calp":"")},
+    el("thead",{},el("tr",{},DOW.map(function(d){ return el("th",{},d); }))),
+    el("tbody",{},rows.map(function(week){
+      return el("tr",{},week.map(function(d){
+        if(d===null) return el("td",{class:"out"},"");
+        const iso=dayIso(k,d);
+        const on=list.filter(function(b){ return b.month===mon && b.day===d; })
+          .sort(function(a,b){ return String(a.who).localeCompare(String(b.who)); });
+        return el("td",{class:iso===tod?"tod":null},
+          el("div",{class:"dnum"},String(d)),
+          on.map(function(b){
+            const sub=b.kind==="familia"? (b.rel||"Familia") : (b.charter||"");
+            if(opts.print) return el("div",{class:"ev"},b.who,
+              sub? el("span",{class:"evsub"}," "+sub) : null);
+            return el("div",{class:"ev",title:b.who
+              +((b.name&&b.name!==b.who)? ("  —  "+b.name) : "")
+              +(b.charter? ("  ·  "+b.charter) : "")
+              +(b.kind==="familia"? ("  ·  "+(b.rel||"Familia")) : "")},
+              b.who, sub? el("span",{class:"evsub"}," "+sub) : null);
+          }));
+      }));
+    })));
+}
+function printBirthdayCalendar(){
+  const srv=window.__MCF_SERVER__;
+  const list=(srv&&srv.birthdays)? ((S.bdays&&S.bdays.list)||[]) : birthdayList();
+  if(!list.length){ toast("Nothing to print.",true); return; }
+  /* the whole year, three months a sheet */
+  const pages=[]; let page=null;
+  for(let m=1;m<=12;m++){
+    if((m-1)%3===0){
+      page=el("div",{class:"docpage"},
+        docHead("Birthdays","The club's year · "+fdate(today())));
+      pages.push(page);
+    }
+    const k=today().slice(0,4)+"-"+(m<10?"0":"")+m;
+    page.append(el("h2",{style:"margin:12px 0 2px"},MONTH_FULL[m-1]),
+      bdayCalendar(k,list,{print:true}));
+    if(m%3===0 || m===12)
+      page.append(docFoot({plain:true,note:"The day only. No ages, no identity numbers, "
+        +"no contact details — pin it up anywhere."}));
+  }
+  doPrint(pages, slug((S.club&&S.club.name)||"club")+"-birthday-calendar.html",
+    "Birthday calendar");
 }
 function printBirthdays(){
   const srv=window.__MCF_SERVER__;
@@ -11125,7 +11217,8 @@ const GUIDE=[
    "Birthdays, on the menu. Who is next, and then the whole year month by month.",
    "The men come off the roll automatically \u2014 a South African identity number carries the date of birth, and the app reads it.",
    "The familia appear once somebody has filled in a date of birth for them.",
-   "Print it for the board."],
+   "Calendar lays a month out the same way the diary does \u2014 today outlined, and the arrows step back and forward through the year.",
+   "Print it for the board: the list, or the whole year as twelve calendar months, three to a sheet."],
   notes:[
    "It reaches across the whole club, the way the diary does. You can wish a brother in another charter a happy birthday without being on his roll.",
    "It is a deliberately thin window: the name he is known by, which charter he rides with, and the day and the month. No year, so no age and no identity number can be worked back out of it. No phone, no address, nothing medical.",
